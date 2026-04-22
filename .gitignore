@@ -1,3 +1,14 @@
+# pngs, pdfs, gifs, and mp4s
+*.png
+*.pdf
+*.gif
+*.mp4
+
+# datasets in npz format
+*.npz
+
+
+## Python
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
