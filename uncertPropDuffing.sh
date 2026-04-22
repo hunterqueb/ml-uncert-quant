@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # run dataset generation for the Duffing system if files do not exist
-if [ ! -f "data/test/duffing_monte_carlo_trajectories_sigma_0.2_dt_0.02_n_20000.npz" ] then
+if [ ! -f "data/test/duffing_monte_carlo_trajectories_sigma_0.2_dt_0.02_n_20000.npz" ]; then
     echo "Generating dataset for the Duffing system..."
     python scripts/datagen/duffing_gen.py
     echo "Dataset generation complete."
