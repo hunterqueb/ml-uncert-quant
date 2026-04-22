@@ -801,7 +801,6 @@ elif modelString.startswith('lstm'):
 print(true_reach.shape)
 print(pred_reach.shape)
 
-
 n_frames = min(true_reach.shape[0], pred_reach.shape[0])
 true_reach = true_reach[:n_frames]
 pred_reach = pred_reach[:n_frames]
@@ -854,20 +853,13 @@ anim = FuncAnimation(
     blit=True,
     repeat=False,
 )
-print("Saving animation...")
+print("Saving reachable set animation...")
 out_base = "plots/" + modelString + f'_reachable_set_evolution_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
 try:
     anim.save(out_base + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
 except Exception:
     anim.save(out_base + '.gif', writer=PillowWriter(fps=20))
 plt.close(fig)
-
-
-n_grid = 80
-x_grid = np.linspace(x_all.min() - x_pad, x_all.max() + x_pad, n_grid)
-y_grid = np.linspace(y_all.min() - y_pad, y_all.max() + y_pad, n_grid)
-XX, YY = np.meshgrid(x_grid, y_grid)
-positions = np.vstack([XX.ravel(), YY.ravel()])
 
 def compute_kde(pts):
     if pts.shape[0] < 4:
@@ -877,6 +869,14 @@ def compute_kde(pts):
         return kde(positions).reshape(XX.shape)
     except Exception:
         return np.zeros(XX.shape)
+
+n_grid = 80
+x_grid = np.linspace(x_all.min() - x_pad, x_all.max() + x_pad, n_grid)
+y_grid = np.linspace(y_all.min() - y_pad, y_all.max() + y_pad, n_grid)
+XX, YY = np.meshgrid(x_grid, y_grid)
+positions = np.vstack([XX.ravel(), YY.ravel()])
+
+print("Saving PDF animation...")
 
 extent = [x_grid[0], x_grid[-1], y_grid[0], y_grid[-1]]
 Z0_true = compute_kde(true_reach[0])
@@ -921,15 +921,78 @@ anim_pdf = FuncAnimation(
     fig_pdf, _update_pdf, init_func=_init_pdf,
     frames=n_frames, interval=70, blit=False, repeat=False,
 )
-print("Saving PDF animation...")
 out_pdf = ("plots/" + modelString +
-           f'_reachable_set_pdf_ratio_{args.train_ratio}_epoch_{n_epochs}'
-           f'_lr_{lr}_train_timesteps_{train_timesteps}')
+        f'_reachable_set_pdf_ratio_{args.train_ratio}_epoch_{n_epochs}'
+        f'_lr_{lr}_train_timesteps_{train_timesteps}')
 try:
     anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
 except Exception:
     anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
 plt.close(fig_pdf)
+
+# KL divergence animation comparing true vs predicted distributions over time
+print("Saving KL divergence animation...")
+_eps = 1e-10
+kl_values = []
+for fi in range(n_frames):
+    p = compute_kde(true_reach[fi]).ravel() + _eps
+    q = compute_kde(pred_reach[fi]).ravel() + _eps
+    p /= p.sum()
+    q /= q.sum()
+    kl_values.append(float(np.sum(p * np.log(p / q))))
+
+fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
+time_axis = [i * float(dt) for i in range(n_frames)]
+ax_kl.set_xlim(0, time_axis[-1])
+ax_kl.set_ylim(0, max(kl_values) * 1.1 + 1e-10)
+ax_kl.set_xlabel('Time (s)')
+ax_kl.set_ylabel('KL Divergence (true || pred)')
+ax_kl.set_title(f'KL Divergence Over Time: {modelString}')
+if train_timesteps < n_frames:
+    ax_kl.axvline(x=time_axis[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+    ax_kl.legend()
+(kl_line,) = ax_kl.plot([], [], color='purple')
+kl_time_text = ax_kl.text(0.02, 0.95, '', transform=ax_kl.transAxes, va='top')
+
+def _init_kl():
+    kl_line.set_data([], [])
+    kl_time_text.set_text('')
+    return kl_line, kl_time_text
+
+def _update_kl(frame_idx):
+    kl_line.set_data(time_axis[:frame_idx + 1], kl_values[:frame_idx + 1])
+    region = 'Train' if frame_idx < train_timesteps else 'Test'
+    kl_time_text.set_text(f'{region} — t = {time_axis[frame_idx]:.2f} s  KL = {kl_values[frame_idx]:.4f}')
+    return kl_line, kl_time_text
+
+anim_kl = FuncAnimation(
+    fig_kl, _update_kl, init_func=_init_kl,
+    frames=n_frames, interval=70, blit=True, repeat=False,
+)
+out_kl = ("plots/" + modelString +
+          f'_kl_divergence_ratio_{args.train_ratio}_epoch_{n_epochs}'
+          f'_lr_{lr}_train_timesteps_{train_timesteps}')
+try:
+    anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+except Exception:
+    anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
+plt.close(fig_kl)
+
+# plot final frame of KL divergence animation as static image
+fig_final_kl = plt.figure(figsize=(10, 5))
+ax_final_kl = fig_final_kl.add_subplot(111)
+ax_final_kl.set_xlim(0, time_axis[-1])
+ax_final_kl.set_ylim(0, max(kl_values) * 1.1 + 1e-10)
+ax_final_kl.set_xlabel('Time (s)')
+ax_final_kl.set_ylabel('KL Divergence (true || pred)')
+ax_final_kl.set_title(f'Final KL Divergence: {modelString} — KL = {kl_values[-1]:.4f}')
+if train_timesteps < n_frames:
+    ax_final_kl.axvline(x=time_axis[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+    ax_final_kl.legend()
+ax_final_kl.plot(time_axis, kl_values, color='purple')
+plt.grid()
+plt.savefig("plots/" + modelString + f'_final_kl_divergence_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close(fig_final_kl)
 
 # plot final frame of PDF animation as static image
 Z_true_final = compute_kde(true_reach[-1])

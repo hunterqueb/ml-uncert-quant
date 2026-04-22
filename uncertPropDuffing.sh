@@ -10,19 +10,19 @@ else
 fi
 
 # 1 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --jetson
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --model lstm --jetson 
 
 
 # 4 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --jetson
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --model lstm --jetson 
 
 
 # 8 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --jetson
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --model lstm --jetson 
 
 # 12 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --model lstm 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --jetson
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --model lstm --jetson
