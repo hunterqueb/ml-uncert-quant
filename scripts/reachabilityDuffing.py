@@ -798,6 +798,22 @@ elif modelString.startswith('lstm'):
     true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)  # (800, N_ts, D)
     pred_reach = np.concatenate([train_prefix, pred_reach_test], axis=0)  # (800, N_ts, D)
 
+from qutils.ml import getQ2Norm
+
+qNorm = getQ2Norm(true_reach, pred_reach)
+
+# plot Q2 norm over time
+plt.figure(figsize=(8, 6))
+plt.plot(t,qNorm, 'm-')
+plt.xlabel('Time (s)')
+plt.ylabel('Q2 Norm')
+plt.title(modelString + ' Q2 Norm Over Time')
+plt.grid()
+# train test boudary line
+plt.axvline(x=train_timesteps*float(dt), color='gray', linestyle='--', label='Train/Test Boundary')
+plt.legend(loc='best')
+plt.savefig("plots/" + modelString + f'_Q2_norm_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+
 print(true_reach.shape)
 print(pred_reach.shape)
 
