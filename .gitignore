@@ -1,8 +1,8 @@
 # pngs, pdfs, gifs, and mp4s
-*.png
-*.pdf
-*.gif
-*.mp4
+# *.png
+# *.pdf
+# *.gif
+# *.mp4
 
 # datasets in npz format
 *.npz
