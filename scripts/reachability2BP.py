@@ -646,32 +646,488 @@ elif modelString.startswith('lstm'):
         pred_train_prefix = train_prefix
     pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
 
-# plots
+# ==============================
+# Helper: alpha shape (3D)
+# ==============================
+
+def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
+    n = points.shape[0]
+    if n < 5:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    try:
+        tet = Delaunay(points)
+    except QhullError:
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    simplices = tet.simplices  # (m, 4)
+    p = points[simplices]      # (m, 4, 3)
+
+    e01 = np.linalg.norm(p[:, 1] - p[:, 0], axis=1)
+    e02 = np.linalg.norm(p[:, 2] - p[:, 0], axis=1)
+    e03 = np.linalg.norm(p[:, 3] - p[:, 0], axis=1)
+    e12 = np.linalg.norm(p[:, 2] - p[:, 1], axis=1)
+    e13 = np.linalg.norm(p[:, 3] - p[:, 1], axis=1)
+    e23 = np.linalg.norm(p[:, 3] - p[:, 2], axis=1)
+    max_edge = np.maximum.reduce([e01, e02, e03, e12, e13, e23])
+
+    cross = np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0])
+    tet_vol = np.abs(np.einsum("ij,ij->i", cross, p[:, 3] - p[:, 0])) / 6.0
+    valid = tet_vol > 1e-14
+    if not np.any(valid):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    thresh = np.quantile(max_edge[valid], edge_quantile)
+    keep = valid & (max_edge <= thresh)
+    if not np.any(keep):
+        hull = ConvexHull(points)
+        return points[hull.simplices], hull.volume
+
+    kept = simplices[keep]
+    faces = np.concatenate(
+        [kept[:, [0, 1, 2]], kept[:, [0, 1, 3]], kept[:, [0, 2, 3]], kept[:, [1, 2, 3]]],
+        axis=0,
+    )
+    faces_sorted = np.sort(faces, axis=1)
+    uniq_faces, counts = np.unique(faces_sorted, axis=0, return_counts=True)
+    boundary_faces = uniq_faces[counts == 1]
+    return points[boundary_faces], tet_vol[keep].sum()
+
+
+# ==============================
+# Plots
+# ==============================
+
+# build time axis (seconds)
+dt_sec = args.propMin * 60.0 / max(num_time_steps - 1, 1)
+t = np.arange(true_reach.shape[0]) * dt_sec
+
+traj_idx = traj_index
+if args.dim:
+    pos_lbl = ['X (km)', 'Y (km)', 'Z (km)']
+    vel_lbl = ['Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
+else:
+    pos_lbl = ['X (nd)', 'Y (nd)', 'Z (nd)']
+    vel_lbl = ['Vx (nd)', 'Vy (nd)', 'Vz (nd)']
+state_labels = pos_lbl + vel_lbl
+
+_pfx = "plots/" + modelString + f'_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
 
 # plot projections of true and predicted reachability tubes for the selected trajectory index
 fig = plt.figure(figsize=(12, 8))
 ax = fig.add_subplot(111, projection='3d')
-traj_idx = traj_index
 ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Reachability', color='blue')
 ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Reachability', color='orange')
 ax.set_title(f"{modelString.upper()} Reachability Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
-ax.set_xlabel('X (km)')
-ax.set_ylabel('Y (km)')
-ax.set_zlabel('Z (km)')
+ax.set_xlabel(pos_lbl[0])
+ax.set_ylabel(pos_lbl[1])
+ax.set_zlabel(pos_lbl[2])
 ax.legend()
-plt.savefig("plots/" + modelString + f'_reachability_traj_{traj_idx}_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}.{saveType}')
+plt.savefig(_pfx + f'_reachability_traj_{traj_idx}.{saveType}')
+plt.close()
 
 # plot each state component over time for the selected trajectory index
-time_steps = np.arange(true_reach.shape[0])
-state_labels = ['X (km)', 'Y (km)', 'Z (km)', 'Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
+time_steps_axis = np.arange(true_reach.shape[0]) * dt_sec
 fig, axs = plt.subplots(3, 2, figsize=(15, 10))
 for i in range(6):
     ax = axs[i // 2, i % 2]
-    ax.plot(time_steps, true_reach[:, traj_idx, i], label='True', color='blue')
-    ax.plot(time_steps, pred_reach[:, traj_idx, i], label='Predicted', color='orange')
+    ax.plot(time_steps_axis, true_reach[:, traj_idx, i], label='True', color='blue')
+    ax.plot(time_steps_axis, pred_reach[:, traj_idx, i], label='Predicted', color='orange')
     ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
-    ax.set_xlabel('Time Step')
+    ax.set_xlabel('Time (s)')
     ax.set_ylabel(state_labels[i])
     ax.legend()
 plt.tight_layout()
-plt.savefig("plots/" + modelString + f'_state_components_traj_{traj_idx}_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}.{saveType}')
+plt.savefig(_pfx + f'_state_components_traj_{traj_idx}.{saveType}')
+plt.close()
+
+# ==============================
+# Final-state alpha shapes (3D)
+# ==============================
+
+final_true_pos = final_true[:, :3]
+final_pred_pos = final_pred[:, :3]
+final_true_vel = final_true[:, 3:]
+final_pred_vel = final_pred[:, 3:]
+
+true_faces_pos, vol_true_pos = alpha_shape_faces_and_volume(final_true_pos)
+pred_faces_pos, vol_pred_pos = alpha_shape_faces_and_volume(final_pred_pos)
+true_faces_vel, vol_true_vel = alpha_shape_faces_and_volume(final_true_vel)
+pred_faces_vel, vol_pred_vel = alpha_shape_faces_and_volume(final_pred_vel)
+
+vol_ratio_pos = vol_pred_pos / vol_true_pos if vol_true_pos > 0 else float('inf')
+vol_ratio_vel = vol_pred_vel / vol_true_vel if vol_true_vel > 0 else float('inf')
+
+print(f"Position Alpha-Shape Volume  — True: {vol_true_pos:.4f}, Pred: {vol_pred_pos:.4f}, Ratio: {vol_ratio_pos:.4f}")
+print(f"Velocity Alpha-Shape Volume  — True: {vol_true_vel:.4f}, Pred: {vol_pred_vel:.4f}, Ratio: {vol_ratio_vel:.4f}")
+
+# 3D final-state scatter — positions
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(final_true_pos[:, 0], final_true_pos[:, 1], final_true_pos[:, 2], s=6, alpha=0.35, c='k', label='True Final Pos')
+ax.scatter(final_pred_pos[:, 0], final_pred_pos[:, 1], final_pred_pos[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Pos')
+true_poly_pos = Poly3DCollection(true_faces_pos, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
+pred_poly_pos = Poly3DCollection(pred_faces_pos, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
+ax.add_collection3d(true_poly_pos)
+ax.add_collection3d(pred_poly_pos)
+ax.set_title(f'{modelString} Final-State Positions Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_pos:.4f}')
+ax.set_xlabel(pos_lbl[0])
+ax.set_ylabel(pos_lbl[1])
+ax.set_zlabel(pos_lbl[2])
+ax.legend()
+plt.savefig(_pfx + f'_final_state_pos_alpha_shape.{saveType}')
+plt.close()
+
+# 3D final-state scatter — velocities
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(final_true_vel[:, 0], final_true_vel[:, 1], final_true_vel[:, 2], s=6, alpha=0.35, c='k', label='True Final Vel')
+ax.scatter(final_pred_vel[:, 0], final_pred_vel[:, 1], final_pred_vel[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Vel')
+true_poly_vel = Poly3DCollection(true_faces_vel, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
+pred_poly_vel = Poly3DCollection(pred_faces_vel, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
+ax.add_collection3d(true_poly_vel)
+ax.add_collection3d(pred_poly_vel)
+ax.set_title(f'{modelString} Final-State Velocities Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_vel:.4f}')
+ax.set_xlabel(vel_lbl[0])
+ax.set_ylabel(vel_lbl[1])
+ax.set_zlabel(vel_lbl[2])
+ax.legend()
+plt.savefig(_pfx + f'_final_state_vel_alpha_shape.{saveType}')
+plt.close()
+
+# 3D final-state scatter only (no alpha shape) — positions
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(final_true_pos[:, 0], final_true_pos[:, 1], final_true_pos[:, 2], s=6, alpha=0.4, c='k', label='True Final Pos')
+ax.scatter(final_pred_pos[:, 0], final_pred_pos[:, 1], final_pred_pos[:, 2], s=6, alpha=0.4, c='r', marker='x', label='Pred Final Pos')
+ax.set_title(f'{modelString} Final-State Positions')
+ax.set_xlabel(pos_lbl[0])
+ax.set_ylabel(pos_lbl[1])
+ax.set_zlabel(pos_lbl[2])
+ax.legend()
+plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
+plt.close()
+
+# 3D final-state scatter only — velocities
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(final_true_vel[:, 0], final_true_vel[:, 1], final_true_vel[:, 2], s=6, alpha=0.4, c='k', label='True Final Vel')
+ax.scatter(final_pred_vel[:, 0], final_pred_vel[:, 1], final_pred_vel[:, 2], s=6, alpha=0.4, c='r', marker='x', label='Pred Final Vel')
+ax.set_title(f'{modelString} Final-State Velocities')
+ax.set_xlabel(vel_lbl[0])
+ax.set_ylabel(vel_lbl[1])
+ax.set_zlabel(vel_lbl[2])
+ax.legend()
+plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
+plt.close()
+
+# ==============================
+# Q2 Norm over time
+# ==============================
+
+from qutils.ml import getQ2Norm
+
+qNorm = getQ2Norm(true_reach, pred_reach)
+
+plt.figure(figsize=(8, 6))
+plt.plot(t, qNorm, 'm-')
+plt.xlabel('Time (s)')
+plt.ylabel('Q2 Norm')
+plt.title(modelString + ' Q2 Norm Over Time')
+plt.axvline(x=train_timesteps * dt_sec, color='gray', linestyle='--', label='Train/Test Boundary')
+plt.legend(loc='best')
+plt.grid()
+plt.savefig(_pfx + f'_Q2_norm.{saveType}')
+plt.close()
+
+print(true_reach.shape)
+print(pred_reach.shape)
+
+# ==============================
+# Reachable-set 3D animation
+# (positions panel + velocities panel)
+# ==============================
+
+n_frames = min(true_reach.shape[0], pred_reach.shape[0])
+true_reach = true_reach[:n_frames]
+pred_reach = pred_reach[:n_frames]
+
+pos_all_true = true_reach[..., :3].reshape(-1, 3)
+pos_all_pred = pred_reach[..., :3].reshape(-1, 3)
+vel_all_true = true_reach[..., 3:].reshape(-1, 3)
+vel_all_pred = pred_reach[..., 3:].reshape(-1, 3)
+
+def _axis_lims(arr_true, arr_pred):
+    combined = np.concatenate([arr_true, arr_pred], axis=0)
+    mn, mx = combined.min(axis=0), combined.max(axis=0)
+    pad = 0.05 * np.maximum(mx - mn, 1e-9)
+    return mn - pad, mx + pad
+
+pos_lo, pos_hi = _axis_lims(pos_all_true, pos_all_pred)
+vel_lo, vel_hi = _axis_lims(vel_all_true, vel_all_pred)
+
+fig_anim = plt.figure(figsize=(14, 6))
+ax_pos = fig_anim.add_subplot(121, projection='3d')
+ax_vel = fig_anim.add_subplot(122, projection='3d')
+for _ax, lo, hi, xl, yl, zl, ttl in [
+    (ax_pos, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2], 'Position'),
+    (ax_vel, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2], 'Velocity'),
+]:
+    _ax.set_xlim(lo[0], hi[0])
+    _ax.set_ylim(lo[1], hi[1])
+    _ax.set_zlim(lo[2], hi[2])
+    _ax.set_xlabel(xl)
+    _ax.set_ylabel(yl)
+    _ax.set_zlabel(zl)
+    _ax.set_title(f'Reachable Set — {ttl}')
+    _ax.grid(alpha=0.2, linewidth=0.5)
+
+sc_true_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
+sc_pred_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
+sc_true_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
+sc_pred_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
+ax_pos.legend(loc='best')
+ax_vel.legend(loc='best')
+frame_txt = fig_anim.text(0.5, 0.01, '', ha='center', fontsize=11)
+fig_anim.suptitle(f'Reachable Set Evolution: {modelString}')
+
+def _anim_init():
+    empty = np.empty((0, 3))
+    for sc in [sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel]:
+        sc._offsets3d = (empty[:, 0], empty[:, 1], empty[:, 2])
+    frame_txt.set_text('')
+    return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
+
+def _anim_update(fi):
+    tp = true_reach[fi, :, :3]
+    pp = pred_reach[fi, :, :3]
+    tv = true_reach[fi, :, 3:]
+    pv = pred_reach[fi, :, 3:]
+    sc_true_pos._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
+    sc_pred_pos._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
+    sc_true_vel._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
+    sc_pred_vel._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
+    region = 'Train' if fi < train_timesteps else 'Test'
+    frame_txt.set_text(f'{region} Region — t = {fi * dt_sec:.1f} s')
+    return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
+
+anim_reach = FuncAnimation(
+    fig_anim, _anim_update, init_func=_anim_init,
+    frames=n_frames, interval=70, blit=False, repeat=False,
+)
+print("Saving reachable set animation...")
+out_anim = _pfx + '_reachable_set_evolution'
+try:
+    anim_reach.save(out_anim + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+except Exception:
+    anim_reach.save(out_anim + '.gif', writer=PillowWriter(fps=20))
+plt.close(fig_anim)
+
+# ==============================
+# KDE helpers (3D)
+# ==============================
+
+n_grid = 30  # 30^3 = 27 000 grid points — manageable for 3D KDE
+
+def _make_grid_3d(lo, hi):
+    axes = [np.linspace(lo[i], hi[i], n_grid) for i in range(3)]
+    G0, G1, G2 = np.meshgrid(*axes, indexing='ij')
+    pos_grid = np.vstack([G0.ravel(), G1.ravel(), G2.ravel()])
+    return G0, G1, G2, pos_grid
+
+G0_pos, G1_pos, G2_pos, grid_pos = _make_grid_3d(pos_lo, pos_hi)
+G0_vel, G1_vel, G2_vel, grid_vel = _make_grid_3d(vel_lo, vel_hi)
+
+def _compute_kde_3d(pts, grid):
+    """Return KDE evaluated on grid; shape matches grid.shape (flattened)."""
+    if pts.shape[0] < 5:
+        return np.zeros(grid.shape[1])
+    try:
+        kde = gaussian_kde(pts.T)
+        return kde(grid)
+    except Exception:
+        return np.zeros(grid.shape[1])
+
+# ==============================
+# KL divergence over time
+# ==============================
+
+_eps = 1e-10
+kl_pos_values = []
+kl_vel_values = []
+
+print("Computing KL divergence over time (this may take a moment)...")
+for fi in range(n_frames):
+    p_pos = _compute_kde_3d(true_reach[fi, :, :3], grid_pos) + _eps
+    q_pos = _compute_kde_3d(pred_reach[fi, :, :3], grid_pos) + _eps
+    p_pos /= p_pos.sum(); q_pos /= q_pos.sum()
+    kl_pos_values.append(float(np.sum(p_pos * np.log(p_pos / q_pos))))
+
+    p_vel = _compute_kde_3d(true_reach[fi, :, 3:], grid_vel) + _eps
+    q_vel = _compute_kde_3d(pred_reach[fi, :, 3:], grid_vel) + _eps
+    p_vel /= p_vel.sum(); q_vel /= q_vel.sum()
+    kl_vel_values.append(float(np.sum(p_vel * np.log(p_vel / q_vel))))
+
+time_axis_anim = [i * dt_sec for i in range(n_frames)]
+
+# Static KL divergence plot
+fig_kl_static, ax_kl_s = plt.subplots(figsize=(10, 5))
+ax_kl_s.plot(time_axis_anim, kl_pos_values, color='steelblue', label='KL Position')
+ax_kl_s.plot(time_axis_anim, kl_vel_values, color='tomato', label='KL Velocity')
+if train_timesteps < n_frames:
+    ax_kl_s.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+ax_kl_s.set_xlabel('Time (s)')
+ax_kl_s.set_ylabel('KL Divergence (true || pred)')
+ax_kl_s.set_title(f'Final KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}, Vel KL={kl_vel_values[-1]:.4f}')
+ax_kl_s.legend()
+plt.grid()
+plt.savefig(_pfx + f'_final_kl_divergence.{saveType}')
+plt.close(fig_kl_static)
+
+# Animated KL divergence
+fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
+ax_kl.set_xlim(0, time_axis_anim[-1])
+kl_ymax = max(max(kl_pos_values), max(kl_vel_values)) * 1.1 + 1e-10
+ax_kl.set_ylim(0, kl_ymax)
+ax_kl.set_xlabel('Time (s)')
+ax_kl.set_ylabel('KL Divergence (true || pred)')
+ax_kl.set_title(f'KL Divergence Over Time: {modelString}')
+if train_timesteps < n_frames:
+    ax_kl.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+(kl_line_pos,) = ax_kl.plot([], [], color='steelblue', label='Position')
+(kl_line_vel,) = ax_kl.plot([], [], color='tomato', label='Velocity')
+kl_txt = ax_kl.text(0.02, 0.95, '', transform=ax_kl.transAxes, va='top')
+ax_kl.legend()
+
+def _init_kl():
+    kl_line_pos.set_data([], [])
+    kl_line_vel.set_data([], [])
+    kl_txt.set_text('')
+    return kl_line_pos, kl_line_vel, kl_txt
+
+def _update_kl(fi):
+    kl_line_pos.set_data(time_axis_anim[:fi + 1], kl_pos_values[:fi + 1])
+    kl_line_vel.set_data(time_axis_anim[:fi + 1], kl_vel_values[:fi + 1])
+    region = 'Train' if fi < train_timesteps else 'Test'
+    kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f}s  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
+    return kl_line_pos, kl_line_vel, kl_txt
+
+anim_kl = FuncAnimation(
+    fig_kl, _update_kl, init_func=_init_kl,
+    frames=n_frames, interval=70, blit=True, repeat=False,
+)
+print("Saving KL divergence animation...")
+out_kl = _pfx + '_kl_divergence'
+try:
+    anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+except Exception:
+    anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
+plt.close(fig_kl)
+
+# ==============================
+# PDF animation (density-colored 3D scatter)
+# Position and velocity subspaces side by side
+# ==============================
+
+def _density_colors(pts, clamp_pct=98):
+    """Evaluate KDE at each sample point; return normalized values for coloring."""
+    if pts.shape[0] < 5:
+        return np.zeros(pts.shape[0])
+    try:
+        kde = gaussian_kde(pts.T)
+        d = kde(pts.T)
+        hi_val = np.percentile(d, clamp_pct)
+        return np.clip(d / max(hi_val, 1e-30), 0, 1)
+    except Exception:
+        return np.zeros(pts.shape[0])
+
+fig_pdf = plt.figure(figsize=(14, 6))
+ax_pos_true_pdf = fig_pdf.add_subplot(221, projection='3d')
+ax_pos_pred_pdf = fig_pdf.add_subplot(222, projection='3d')
+ax_vel_true_pdf = fig_pdf.add_subplot(223, projection='3d')
+ax_vel_pred_pdf = fig_pdf.add_subplot(224, projection='3d')
+
+for _ax, lo, hi, xl, yl, zl in [
+    (ax_pos_true_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_pos_pred_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_vel_true_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+    (ax_vel_pred_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+]:
+    _ax.set_xlim(lo[0], hi[0])
+    _ax.set_ylim(lo[1], hi[1])
+    _ax.set_zlim(lo[2], hi[2])
+    _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
+
+ax_pos_true_pdf.set_title('True Position PDF')
+ax_pos_pred_pdf.set_title('Pred Position PDF')
+ax_vel_true_pdf.set_title('True Velocity PDF')
+ax_vel_pred_pdf.set_title('Pred Velocity PDF')
+fig_pdf.suptitle(f'Reachable Set PDF Evolution: {modelString}')
+time_txt_pdf = fig_pdf.text(0.5, 0.01, '', ha='center', fontsize=11)
+
+# pre-build scatter artists with dummy data
+_dummy = np.zeros((1, 3))
+sc_pos_true = ax_pos_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
+sc_pos_pred = ax_pos_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
+sc_vel_true = ax_vel_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
+sc_vel_pred = ax_vel_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
+
+def _init_pdf():
+    time_txt_pdf.set_text('')
+    return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
+
+def _update_pdf(fi):
+    tp = true_reach[fi, :, :3]
+    pp = pred_reach[fi, :, :3]
+    tv = true_reach[fi, :, 3:]
+    pv = pred_reach[fi, :, 3:]
+    sc_pos_true._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
+    sc_pos_true.set_array(_density_colors(tp))
+    sc_pos_pred._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
+    sc_pos_pred.set_array(_density_colors(pp))
+    sc_vel_true._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
+    sc_vel_true.set_array(_density_colors(tv))
+    sc_vel_pred._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
+    sc_vel_pred.set_array(_density_colors(pv))
+    region = 'Train' if fi < train_timesteps else 'Test'
+    time_txt_pdf.set_text(f'{region} Region — t = {fi * dt_sec:.1f} s')
+    return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
+
+anim_pdf = FuncAnimation(
+    fig_pdf, _update_pdf, init_func=_init_pdf,
+    frames=n_frames, interval=70, blit=False, repeat=False,
+)
+print("Saving PDF animation...")
+out_pdf = _pfx + '_reachable_set_pdf'
+try:
+    anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+except Exception:
+    anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
+plt.close(fig_pdf)
+
+# Static final-frame PDF snapshot
+fig_pdf_final = plt.figure(figsize=(14, 6))
+ax_pf_tp = fig_pdf_final.add_subplot(221, projection='3d')
+ax_pf_pp = fig_pdf_final.add_subplot(222, projection='3d')
+ax_pf_tv = fig_pdf_final.add_subplot(223, projection='3d')
+ax_pf_pv = fig_pdf_final.add_subplot(224, projection='3d')
+
+for _ax, pts, cm, lbl, lo, hi, xl, yl, zl in [
+    (ax_pf_tp, true_reach[-1, :, :3], 'Blues', 'True Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_pf_pp, pred_reach[-1, :, :3], 'Reds',  'Pred Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_pf_tv, true_reach[-1, :, 3:], 'Blues', 'True Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+    (ax_pf_pv, pred_reach[-1, :, 3:], 'Reds',  'Pred Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+]:
+    c = _density_colors(pts)
+    _ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=5, c=c, cmap=cm, vmin=0, vmax=1)
+    _ax.set_xlim(lo[0], hi[0]); _ax.set_ylim(lo[1], hi[1]); _ax.set_zlim(lo[2], hi[2])
+    _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
+    _ax.set_title(lbl)
+
+fig_pdf_final.suptitle(f'Final Reachable Set PDF: {modelString}')
+fig_pdf_final.tight_layout()
+plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
+plt.close(fig_pdf_final)
