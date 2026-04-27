@@ -36,7 +36,7 @@ parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for tr
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
 parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensional coordinates")
 parser.add_argument('--propMin',type=float,default=30,help="propagation time in minutes for picking dataset (used in dataset path and plot titles)")
-parser.add_argument('--n',type=int,default=3000,help='amount of trajectories used for picking dataset')
+parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
 parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
 parser.add_argument('--orbit', type=str, default='leo', help='Orbit type for picking dataset (used in plot titles)')
 
@@ -646,6 +646,12 @@ elif modelString.startswith('lstm'):
         pred_train_prefix = train_prefix
     pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
 
+# change to km and km/s for better interpretability in plots -- turn off with args
+if not args.dim:
+    for i in range(true_reach.shape[1]):
+        true_reach[:, i, :] = nonDim2Dim6(true_reach[:, i, :])
+        pred_reach[:, i, :] = nonDim2Dim6(pred_reach[:, i, :])
+
 # ==============================
 # Helper: alpha shape (3D)
 # ==============================
@@ -702,16 +708,11 @@ def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
 # ==============================
 
 # build time axis (seconds)
-dt_sec = args.propMin * 60.0 / max(num_time_steps - 1, 1)
-t = np.arange(true_reach.shape[0]) * dt_sec
+t = np.arange(true_reach.shape[0])
 
 traj_idx = traj_index
-if args.dim:
-    pos_lbl = ['X (km)', 'Y (km)', 'Z (km)']
-    vel_lbl = ['Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
-else:
-    pos_lbl = ['X (nd)', 'Y (nd)', 'Z (nd)']
-    vel_lbl = ['Vx (nd)', 'Vy (nd)', 'Vz (nd)']
+pos_lbl = ['X (km)', 'Y (km)', 'Z (km)']
+vel_lbl = ['Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
 state_labels = pos_lbl + vel_lbl
 
 _pfx = "plots/" + modelString + f'_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
@@ -730,14 +731,17 @@ plt.savefig(_pfx + f'_reachability_traj_{traj_idx}.{saveType}')
 plt.close()
 
 # plot each state component over time for the selected trajectory index
-time_steps_axis = np.arange(true_reach.shape[0]) * dt_sec
+time_steps_axis = np.arange(true_reach.shape[0])
 fig, axs = plt.subplots(3, 2, figsize=(15, 10))
 for i in range(6):
     ax = axs[i // 2, i % 2]
     ax.plot(time_steps_axis, true_reach[:, traj_idx, i], label='True', color='blue')
     ax.plot(time_steps_axis, pred_reach[:, traj_idx, i], label='Predicted', color='orange')
+    # add vertical line for train/test split
+    split_time = int(train_timesteps)
+    ax.axvline(x=split_time, color='gray', linestyle='--', label='Train/Test Split')
     ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
-    ax.set_xlabel('Time (s)')
+    ax.set_xlabel('Time (min)')
     ax.set_ylabel(state_labels[i])
     ax.legend()
 plt.tight_layout()
@@ -834,10 +838,10 @@ qNorm = getQ2Norm(true_reach, pred_reach)
 
 plt.figure(figsize=(8, 6))
 plt.plot(t, qNorm, 'm-')
-plt.xlabel('Time (s)')
+plt.xlabel('Time (min)')
 plt.ylabel('Q2 Norm')
 plt.title(modelString + ' Q2 Norm Over Time')
-plt.axvline(x=train_timesteps * dt_sec, color='gray', linestyle='--', label='Train/Test Boundary')
+plt.axvline(x=train_timesteps, color='gray', linestyle='--', label='Train/Test Boundary')
 plt.legend(loc='best')
 plt.grid()
 plt.savefig(_pfx + f'_Q2_norm.{saveType}')
@@ -911,7 +915,7 @@ def _anim_update(fi):
     sc_true_vel._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
     sc_pred_vel._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
     region = 'Train' if fi < train_timesteps else 'Test'
-    frame_txt.set_text(f'{region} Region — t = {fi * dt_sec:.1f} s')
+    frame_txt.set_text(f'{region} Region — t = {fi} min')
     return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
 
 anim_reach = FuncAnimation(
@@ -971,7 +975,7 @@ for fi in range(n_frames):
     p_vel /= p_vel.sum(); q_vel /= q_vel.sum()
     kl_vel_values.append(float(np.sum(p_vel * np.log(p_vel / q_vel))))
 
-time_axis_anim = [i * dt_sec for i in range(n_frames)]
+time_axis_anim = [i for i in range(n_frames)]
 
 # Static KL divergence plot
 fig_kl_static, ax_kl_s = plt.subplots(figsize=(10, 5))
@@ -979,7 +983,7 @@ ax_kl_s.plot(time_axis_anim, kl_pos_values, color='steelblue', label='KL Positio
 ax_kl_s.plot(time_axis_anim, kl_vel_values, color='tomato', label='KL Velocity')
 if train_timesteps < n_frames:
     ax_kl_s.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_s.set_xlabel('Time (s)')
+ax_kl_s.set_xlabel('Time (min)')
 ax_kl_s.set_ylabel('KL Divergence (true || pred)')
 ax_kl_s.set_title(f'Final KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}, Vel KL={kl_vel_values[-1]:.4f}')
 ax_kl_s.legend()
@@ -992,7 +996,7 @@ fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
 ax_kl.set_xlim(0, time_axis_anim[-1])
 kl_ymax = max(max(kl_pos_values), max(kl_vel_values)) * 1.1 + 1e-10
 ax_kl.set_ylim(0, kl_ymax)
-ax_kl.set_xlabel('Time (s)')
+ax_kl.set_xlabel('Time (min)')
 ax_kl.set_ylabel('KL Divergence (true || pred)')
 ax_kl.set_title(f'KL Divergence Over Time: {modelString}')
 if train_timesteps < n_frames:
@@ -1012,7 +1016,7 @@ def _update_kl(fi):
     kl_line_pos.set_data(time_axis_anim[:fi + 1], kl_pos_values[:fi + 1])
     kl_line_vel.set_data(time_axis_anim[:fi + 1], kl_vel_values[:fi + 1])
     region = 'Train' if fi < train_timesteps else 'Test'
-    kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f}s  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
+    kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f} min  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
     return kl_line_pos, kl_line_vel, kl_txt
 
 anim_kl = FuncAnimation(
@@ -1093,7 +1097,7 @@ def _update_pdf(fi):
     sc_vel_pred._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
     sc_vel_pred.set_array(_density_colors(pv))
     region = 'Train' if fi < train_timesteps else 'Test'
-    time_txt_pdf.set_text(f'{region} Region — t = {fi * dt_sec:.1f} s')
+    time_txt_pdf.set_text(f'{region} Region — t = {fi} min')
     return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
 
 anim_pdf = FuncAnimation(
