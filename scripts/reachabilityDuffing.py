@@ -762,9 +762,6 @@ if modelString.startswith('mamba'):
 # Each array covers the full time range: the initial lookback window states followed by
 # per-window predictions, giving a complete reachable-surface animation from t=0.
 if modelString.startswith('mamba'):
-    # test_in[0]: (lookback, num_trajs, D) — initial states for all trajs (original space)
-    # test_out:   (num_windows, num_trajs, D) — true targets at each window
-    # test_pred_full (= full_pred_seq from mambaEval): (lookback+num_windows, num_trajs, D) — already stitched
     init_reach = test_in.numpy()[0]                          # (lookback, num_trajs, D)
     true_reach_test = np.concatenate(
         [init_reach, test_out.detach().cpu().numpy()], axis=0
@@ -772,16 +769,30 @@ if modelString.startswith('mamba'):
     pred_reach_test = np.concatenate(
         [init_reach, test_pred_full.detach().cpu().numpy()], axis=0
     )                                                        # (lookback+num_windows, num_test_trajs, D)
-    # Prepend ground-truth training portion to reach full 800-step sequences
     traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
     n_test_trajs = true_reach_test.shape[1]  # respects jetson 1000-traj limit
     train_prefix = numericResult[:train_timesteps, traj_split_idx:traj_split_idx + n_test_trajs, :]
-    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)  # (800, num_test_trajs, D)
-    pred_reach = np.concatenate([train_prefix, pred_reach_test], axis=0)  # (800, num_test_trajs, D)
+    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)
+    # Run model on test-trajectory training-time windows to build predicted train prefix
+    test_trajs_train_time = numericResult[:train_timesteps, traj_split_idx:traj_split_idx + n_test_trajs, :]
+    W_tr_pred = train_timesteps - lookback - horizon + 1
+    if W_tr_pred > 0:
+        xs_tr = [test_trajs_train_time[i:i + lookback] for i in range(W_tr_pred)]
+        X_tr_pred = torch.tensor(np.stack(xs_tr, axis=0)).float()  # (W_tr_pred, lookback, n_test_trajs, D)
+        with torch.no_grad():
+            model.eval()
+            tr_preds = []
+            for (xb_eval,) in data.DataLoader(data.TensorDataset(X_tr_pred), shuffle=False, batch_size=args.batch_test):
+                xb_eval = xb_eval.to(device)
+                b, L, T, D_sz = xb_eval.shape
+                xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
+                tr_preds.append(model(xb_mamba)[-1].cpu().reshape(b, T, D_sz))
+            train_pred_wins = torch.cat(tr_preds, dim=0).numpy()  # (W_tr_pred, n_test_trajs, D)
+        pred_train_prefix = np.concatenate([test_trajs_train_time[:lookback], train_pred_wins], axis=0)
+    else:
+        pred_train_prefix = train_prefix
+    pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
 elif modelString.startswith('lstm'):
-    # test_in:      (W_te*N_ts, lookback, D) normalized, layout window-major traj-minor
-    # test_out:     (W_te*N_ts, D) normalized
-    # test_pred_full: (W_te*N_ts, D) denormalized
     W_te = meta["W_test"]
     N_ts = meta["N_test"]
     mu_np = norm["mu"].numpy()
@@ -791,12 +802,31 @@ elif modelString.startswith('lstm'):
     init_reach = init_np.transpose(1, 0, 2) * sig_np + mu_np  # (lookback, N_ts, D) denormalized
     true_reach_wins = (test_out.detach().cpu().numpy() * sig_np + mu_np).reshape(W_te, N_ts, -1)
     pred_reach_wins = test_pred_full.detach().cpu().numpy().reshape(W_te, N_ts, -1)
-    true_reach_test = np.concatenate([init_reach, true_reach_wins], axis=0)  # (500, N_ts, D)
-    pred_reach_test = np.concatenate([init_reach, pred_reach_wins], axis=0)  # (500, N_ts, D)
-    # Prepend ground-truth training portion to reach full 800-step sequences
-    train_prefix = numericResult[:train_timesteps, :N_ts, :]  # (300, N_ts, D) — match test traj count
-    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)  # (800, N_ts, D)
-    pred_reach = np.concatenate([train_prefix, pred_reach_test], axis=0)  # (800, N_ts, D)
+    true_reach_test = np.concatenate([init_reach, true_reach_wins], axis=0)
+    pred_reach_test = np.concatenate([init_reach, pred_reach_wins], axis=0)
+    split_t = meta["split_t"]
+    train_prefix = numericResult[:split_t, :N_ts, :]
+    true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)
+    # Run model on test-trajectory training-time windows to build predicted train prefix
+    test_trajs_train = numericResult[:split_t, :N_ts, :]  # (split_t, N_ts, D)
+    W_tr_pred = split_t - lookback - horizon + 1
+    if W_tr_pred > 0:
+        X_tr = np.stack([test_trajs_train[i:i + lookback] for i in range(W_tr_pred)], axis=0)
+        X_tr_flat = X_tr.transpose(0, 2, 1, 3).reshape(W_tr_pred * N_ts, lookback, -1)
+        X_tr_flat = (X_tr_flat - mu_np) / sig_np
+        X_tr_t = torch.tensor(X_tr_flat, dtype=torch.float32)
+        with torch.no_grad():
+            model.eval()
+            tr_preds = []
+            for (xb_eval,) in data.DataLoader(data.TensorDataset(X_tr_t), shuffle=False, batch_size=args.batch_test):
+                xb_eval = xb_eval.to(device)
+                tr_preds.append(model(xb_eval).cpu())
+            train_pred_flat = torch.cat(tr_preds, dim=0).numpy() * sig_np + mu_np  # denormalized
+        train_pred_wins_tr = train_pred_flat.reshape(W_tr_pred, N_ts, -1)
+        pred_train_prefix = np.concatenate([test_trajs_train[:lookback], train_pred_wins_tr], axis=0)
+    else:
+        pred_train_prefix = train_prefix
+    pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
 
 from qutils.ml import getQ2Norm
 
