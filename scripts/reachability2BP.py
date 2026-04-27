@@ -977,19 +977,30 @@ for fi in range(n_frames):
 
 time_axis_anim = [i for i in range(n_frames)]
 
-# Static KL divergence plot
-fig_kl_static, ax_kl_s = plt.subplots(figsize=(10, 5))
-ax_kl_s.plot(time_axis_anim, kl_pos_values, color='steelblue', label='KL Position')
-ax_kl_s.plot(time_axis_anim, kl_vel_values, color='tomato', label='KL Velocity')
+# Static KL divergence plots (position and velocity separate)
+fig_kl_pos, ax_kl_pos = plt.subplots(figsize=(10, 5))
+ax_kl_pos.plot(time_axis_anim, kl_pos_values, color='steelblue', label='KL Position')
 if train_timesteps < n_frames:
-    ax_kl_s.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_s.set_xlabel('Time (min)')
-ax_kl_s.set_ylabel('KL Divergence (true || pred)')
-ax_kl_s.set_title(f'Final KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}, Vel KL={kl_vel_values[-1]:.4f}')
-ax_kl_s.legend()
-plt.grid()
-plt.savefig(_pfx + f'_final_kl_divergence.{saveType}')
-plt.close(fig_kl_static)
+    ax_kl_pos.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+ax_kl_pos.set_xlabel('Time (min)')
+ax_kl_pos.set_ylabel('KL Divergence (true || pred)')
+ax_kl_pos.set_title(f'Final Position KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}')
+ax_kl_pos.legend()
+ax_kl_pos.grid()
+plt.savefig(_pfx + f'_final_kl_divergence_pos.{saveType}')
+plt.close(fig_kl_pos)
+
+fig_kl_vel, ax_kl_vel = plt.subplots(figsize=(10, 5))
+ax_kl_vel.plot(time_axis_anim, kl_vel_values, color='tomato', label='KL Velocity')
+if train_timesteps < n_frames:
+    ax_kl_vel.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+ax_kl_vel.set_xlabel('Time (min)')
+ax_kl_vel.set_ylabel('KL Divergence (true || pred)')
+ax_kl_vel.set_title(f'Final Velocity KL Divergence: {modelString} — Vel KL={kl_vel_values[-1]:.4f}')
+ax_kl_vel.legend()
+ax_kl_vel.grid()
+plt.savefig(_pfx + f'_final_kl_divergence_vel.{saveType}')
+plt.close(fig_kl_vel)
 
 # Animated KL divergence
 fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
