@@ -26,8 +26,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
 parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the model')
-parser.add_argument('--train-timesteps', type=int, default=4, help='Number of time steps from each edge used as training time region')
-parser.add_argument('--traj-index', type=int, default=0, help='Trajectory index to plot')
+parser.add_argument('--train-timesteps', type=int, default=10, help='Number of time steps from each edge used as training time region')
+parser.add_argument('--traj-index', type=int, default=124, help='Trajectory index to plot')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=128, help='Batch size for evaluation')
@@ -35,9 +35,15 @@ parser.add_argument('--n-epochs', type=int, default=10, help='Number of training
 parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for training')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
 parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensional coordinates")
-parser.add_argument('--dv',type=float,default=5.0,help="amount of delta v used for picking dataset")
-parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
+parser.add_argument('--propMin',type=float,default=30,help="propagation time in minutes for picking dataset (used in dataset path and plot titles)")
+parser.add_argument('--n',type=int,default=3000,help='amount of trajectories used for picking dataset')
 parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
+parser.add_argument('--orbit', type=str, default='leo', help='Orbit type for picking dataset (used in plot titles)')
+
+parser.add_argument('--hidden', type=int, default=64, help='Hidden size for LSTM')
+parser.add_argument('--layers', type=int, default=1, help='Number of layers for LSTM')
+parser.add_argument('--dropout', type=float, default=0.1, help='Dropout for LSTM')
+parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping norm for LSTM')
 
 args = parser.parse_args()
 modelString = args.model
@@ -101,12 +107,13 @@ train_timesteps = args.train_timesteps
 
 
 # import gmat dataset
-dataset_loc = f"./data/gmat/{args.dv}km-{args.n}"
+dataset_loc = f"./data/gmat/"+args.orbit+f"/{args.propMin}min-{args.n}"
 dataset_file = "/statesArrayNoThrust.npy"
 
 dataset = np.load(dataset_loc+dataset_file)["statesArrayNoThrust"] # (n_traj,min_prop,problemDim)
 num_trajs = dataset.shape[0]
 num_time_steps = dataset.shape[1]
+print(dataset.shape)
 
 # convert to nondim for better ML -- turn off with args
 if not args.dim:
@@ -638,3 +645,33 @@ elif modelString.startswith('lstm'):
     else:
         pred_train_prefix = train_prefix
     pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
+
+# plots
+
+# plot projections of true and predicted reachability tubes for the selected trajectory index
+fig = plt.figure(figsize=(12, 8))
+ax = fig.add_subplot(111, projection='3d')
+traj_idx = traj_index
+ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Reachability', color='blue')
+ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Reachability', color='orange')
+ax.set_title(f"{modelString.upper()} Reachability Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
+ax.set_xlabel('X (km)')
+ax.set_ylabel('Y (km)')
+ax.set_zlabel('Z (km)')
+ax.legend()
+plt.savefig("plots/" + modelString + f'_reachability_traj_{traj_idx}_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}.{saveType}')
+
+# plot each state component over time for the selected trajectory index
+time_steps = np.arange(true_reach.shape[0])
+state_labels = ['X (km)', 'Y (km)', 'Z (km)', 'Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
+fig, axs = plt.subplots(3, 2, figsize=(15, 10))
+for i in range(6):
+    ax = axs[i // 2, i % 2]
+    ax.plot(time_steps, true_reach[:, traj_idx, i], label='True', color='blue')
+    ax.plot(time_steps, pred_reach[:, traj_idx, i], label='Predicted', color='orange')
+    ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
+    ax.set_xlabel('Time Step')
+    ax.set_ylabel(state_labels[i])
+    ax.legend()
+plt.tight_layout()
+plt.savefig("plots/" + modelString + f'_state_components_traj_{traj_idx}_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}.{saveType}')
