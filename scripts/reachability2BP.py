@@ -651,6 +651,8 @@ if not args.dim:
     for i in range(true_reach.shape[1]):
         true_reach[:, i, :] = nonDim2Dim6(true_reach[:, i, :])
         pred_reach[:, i, :] = nonDim2Dim6(pred_reach[:, i, :])
+    final_true = nonDim2Dim6(final_true)
+    final_pred = nonDim2Dim6(final_pred)
 
 # ==============================
 # Helper: alpha shape (3D)
@@ -987,7 +989,7 @@ for ax, d_true, d_pred, xlabel, title in [
     ax.plot(x_true_s, cdf, color='steelblue', label='True')
     ax.plot(x_pred_s, cdf, color='tomato', label='Pred')
     ax.set_xlabel(xlabel)
-    ax.set_ylabel('Fraction of trajectories')
+    ax.set_ylabel('Cummulative Probability')
     ax.set_title(title)
     ax.legend()
     ax.grid()
@@ -1013,8 +1015,8 @@ ax_cdf1.plot(np.sort(pooled_pred),
              np.arange(1, len(pooled_pred) + 1) / len(pooled_pred),
              color='tomato', label='Pred')
 ax_cdf1.set_xlabel('Normalized state value (σ from true mean)')
-ax_cdf1.set_ylabel('Fraction of samples')
-ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)\nAll 6 dimensions pooled after z-scoring')
+ax_cdf1.set_ylabel('Cummulative Probability')
+ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)')
 ax_cdf1.legend()
 ax_cdf1.grid()
 plt.tight_layout()
