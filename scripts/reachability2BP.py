@@ -920,17 +920,18 @@ def _anim_update(fi):
     frame_txt.set_text(f'{region} Region — t = {fi} min')
     return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
 
-anim_reach = FuncAnimation(
-    fig_anim, _anim_update, init_func=_anim_init,
-    frames=n_frames, interval=70, blit=False, repeat=False,
-)
-print("Saving reachable set animation...")
-out_anim = _pfx + '_reachable_set_evolution'
-try:
-    anim_reach.save(out_anim + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim_reach.save(out_anim + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig_anim)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    anim_reach = FuncAnimation(
+        fig_anim, _anim_update, init_func=_anim_init,
+        frames=n_frames, interval=70, blit=False, repeat=False,
+    )
+    print("Saving reachable set animation...")
+    out_anim = _pfx + '_reachable_set_evolution'
+    try:
+        anim_reach.save(out_anim + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim_reach.save(out_anim + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig_anim)
 
 # ==============================
 # KDE helpers (3D)
@@ -1097,17 +1098,18 @@ def _update_kl(fi):
     kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f} min  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
     return kl_line_pos, kl_line_vel, kl_txt
 
-anim_kl = FuncAnimation(
-    fig_kl, _update_kl, init_func=_init_kl,
-    frames=n_frames, interval=70, blit=True, repeat=False,
-)
-print("Saving KL divergence animation...")
-out_kl = _pfx + '_kl_divergence'
-try:
-    anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig_kl)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    anim_kl = FuncAnimation(
+        fig_kl, _update_kl, init_func=_init_kl,
+        frames=n_frames, interval=70, blit=True, repeat=False,
+    )
+    print("Saving KL divergence animation...")
+    out_kl = _pfx + '_kl_divergence'
+    try:
+        anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig_kl)
 
 # ==============================
 # PDF animation (density-colored 3D scatter)
@@ -1178,17 +1180,18 @@ def _update_pdf(fi):
     time_txt_pdf.set_text(f'{region} Region — t = {fi} min')
     return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
 
-anim_pdf = FuncAnimation(
-    fig_pdf, _update_pdf, init_func=_init_pdf,
-    frames=n_frames, interval=70, blit=False, repeat=False,
-)
-print("Saving PDF animation...")
-out_pdf = _pfx + '_reachable_set_pdf'
-try:
-    anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig_pdf)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    anim_pdf = FuncAnimation(
+        fig_pdf, _update_pdf, init_func=_init_pdf,
+        frames=n_frames, interval=70, blit=False, repeat=False,
+    )
+    print("Saving PDF animation...")
+    out_pdf = _pfx + '_reachable_set_pdf'
+    try:
+        anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig_pdf)
 
 # Static final-frame PDF snapshot
 fig_pdf_final = plt.figure(figsize=(14, 6))

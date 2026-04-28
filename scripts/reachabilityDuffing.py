@@ -890,22 +890,23 @@ def _update(frame_idx):
         frame_text.set_text(f'Test Region\nt = {frame_idx * float(dt):.2f} s')
     return true_scatter, pred_scatter, frame_text
 
-anim = FuncAnimation(
-    fig,
-    _update,
-    init_func=_init,
-    frames=n_frames,
-    interval=70,
-    blit=True,
-    repeat=False,
-)
-print("Saving reachable set animation...")
-out_base = "plots/" + modelString + f'_reachable_set_evolution_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
-try:
-    anim.save(out_base + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim.save(out_base + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    anim = FuncAnimation(
+        fig,
+        _update,
+        init_func=_init,
+        frames=n_frames,
+        interval=70,
+        blit=True,
+        repeat=False,
+    )
+    print("Saving reachable set animation...")
+    out_base = "plots/" + modelString + f'_reachable_set_evolution_ratio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
+    try:
+        anim.save(out_base + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim.save(out_base + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig)
 
 def compute_kde(pts):
     if pts.shape[0] < 4:
@@ -922,7 +923,6 @@ y_grid = np.linspace(y_all.min() - y_pad, y_all.max() + y_pad, n_grid)
 XX, YY = np.meshgrid(x_grid, y_grid)
 positions = np.vstack([XX.ravel(), YY.ravel()])
 
-print("Saving PDF animation...")
 
 extent = [x_grid[0], x_grid[-1], y_grid[0], y_grid[-1]]
 Z0_true = compute_kde(true_reach[0])
@@ -963,21 +963,22 @@ def _update_pdf(frame_idx):
     time_text_pdf.set_text(f'{region} Region — t = {frame_idx * float(dt):.2f} s')
     return []
 
-anim_pdf = FuncAnimation(
-    fig_pdf, _update_pdf, init_func=_init_pdf,
-    frames=n_frames, interval=70, blit=False, repeat=False,
-)
-out_pdf = ("plots/" + modelString +
-        f'_reachable_set_pdf_ratio_{args.train_ratio}_epoch_{n_epochs}'
-        f'_lr_{lr}_train_timesteps_{train_timesteps}')
-try:
-    anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig_pdf)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    print("Saving PDF animation...")
+    anim_pdf = FuncAnimation(
+        fig_pdf, _update_pdf, init_func=_init_pdf,
+        frames=n_frames, interval=70, blit=False, repeat=False,
+    )
+    out_pdf = ("plots/" + modelString +
+            f'_reachable_set_pdf_ratio_{args.train_ratio}_epoch_{n_epochs}'
+            f'_lr_{lr}_train_timesteps_{train_timesteps}')
+    try:
+        anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig_pdf)
 
 # KL divergence animation comparing true vs predicted distributions over time
-print("Saving KL divergence animation...")
 _eps = 1e-10
 kl_values = []
 for fi in range(n_frames):
@@ -1011,18 +1012,21 @@ def _update_kl(frame_idx):
     kl_time_text.set_text(f'{region} — t = {time_axis[frame_idx]:.2f} s  KL = {kl_values[frame_idx]:.4f}')
     return kl_line, kl_time_text
 
-anim_kl = FuncAnimation(
-    fig_kl, _update_kl, init_func=_init_kl,
-    frames=n_frames, interval=70, blit=True, repeat=False,
-)
-out_kl = ("plots/" + modelString +
-          f'_kl_divergence_ratio_{args.train_ratio}_epoch_{n_epochs}'
-          f'_lr_{lr}_train_timesteps_{train_timesteps}')
-try:
-    anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-except Exception:
-    anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
-plt.close(fig_kl)
+if saveType != "pdf":  # skip animation for PDF output to save time
+    print("Saving KL divergence animation...")
+
+    anim_kl = FuncAnimation(
+        fig_kl, _update_kl, init_func=_init_kl,
+        frames=n_frames, interval=70, blit=True, repeat=False,
+    )
+    out_kl = ("plots/" + modelString +
+            f'_kl_divergence_ratio_{args.train_ratio}_epoch_{n_epochs}'
+            f'_lr_{lr}_train_timesteps_{train_timesteps}')
+    try:
+        anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+    except Exception:
+        anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
+    plt.close(fig_kl)
 
 # plot final frame of KL divergence animation as static image
 fig_final_kl = plt.figure(figsize=(10, 5))
