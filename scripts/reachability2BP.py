@@ -956,6 +956,71 @@ def _compute_kde_3d(pts, grid):
         return np.zeros(grid.shape[1])
 
 # ==============================
+# Marginal CDFs
+# ==============================
+
+pts_true_6d = true_reach[-1]               # (N_trajs, 6)
+pts_pred_6d = pred_reach[-1]               # (N_trajs, 6)
+
+# Compute 3D Euclidean distance from the ensemble centroid for position and
+# velocity separately. This gives a single physically-meaningful CDF per
+# subspace: "what fraction of trajectories lie within R km (or km/s) of the
+# reachable-set center?"
+centroid_true_pos = pts_true_6d[:, :3].mean(axis=0)
+centroid_true_vel = pts_true_6d[:, 3:].mean(axis=0)
+
+dist_true_pos = np.linalg.norm(pts_true_6d[:, :3] - centroid_true_pos, axis=1)
+dist_pred_pos = np.linalg.norm(pts_pred_6d[:, :3] - centroid_true_pos, axis=1)
+dist_true_vel = np.linalg.norm(pts_true_6d[:, 3:] - centroid_true_vel, axis=1)
+dist_pred_vel = np.linalg.norm(pts_pred_6d[:, 3:] - centroid_true_vel, axis=1)
+
+fig_cdf, (ax_pos_cdf, ax_vel_cdf) = plt.subplots(1, 2, figsize=(14, 6))
+for ax, d_true, d_pred, xlabel, title in [
+    (ax_pos_cdf, dist_true_pos, dist_pred_pos,
+     'Distance from centroid (km)', 'Position CDF'),
+    (ax_vel_cdf, dist_true_vel, dist_pred_vel,
+     'Distance from centroid (km/s)', 'Velocity CDF'),
+]:
+    x_true_s = np.sort(d_true)
+    x_pred_s = np.sort(d_pred)
+    cdf = np.arange(1, len(x_true_s) + 1) / len(x_true_s)
+    ax.plot(x_true_s, cdf, color='steelblue', label='True')
+    ax.plot(x_pred_s, cdf, color='tomato', label='Pred')
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel('Fraction of trajectories')
+    ax.set_title(title)
+    ax.legend()
+    ax.grid()
+
+fig_cdf.suptitle(f'{modelString} Reachable Set CDF (Final State)')
+plt.tight_layout()
+plt.savefig(_pfx + f'_marginal_cdfs.{saveType}')
+plt.close(fig_cdf)
+
+# Single combined CDF: z-score each dimension using the true distribution's
+# mean/std, then pool all 6*N normalized values onto one abstract axis.
+mu_6d = pts_true_6d.mean(axis=0)
+sig_6d = np.where(pts_true_6d.std(axis=0) < 1e-8, 1.0, pts_true_6d.std(axis=0))
+
+pooled_true = ((pts_true_6d - mu_6d) / sig_6d).ravel()
+pooled_pred = ((pts_pred_6d - mu_6d) / sig_6d).ravel()
+
+fig_cdf1, ax_cdf1 = plt.subplots(figsize=(10, 6))
+ax_cdf1.plot(np.sort(pooled_true),
+             np.arange(1, len(pooled_true) + 1) / len(pooled_true),
+             color='steelblue', label='True')
+ax_cdf1.plot(np.sort(pooled_pred),
+             np.arange(1, len(pooled_pred) + 1) / len(pooled_pred),
+             color='tomato', label='Pred')
+ax_cdf1.set_xlabel('Normalized state value (σ from true mean)')
+ax_cdf1.set_ylabel('Fraction of samples')
+ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)\nAll 6 dimensions pooled after z-scoring')
+ax_cdf1.legend()
+ax_cdf1.grid()
+plt.tight_layout()
+plt.savefig(_pfx + f'_combined_marginal_cdf.{saveType}')
+plt.close(fig_cdf1)
+# ==============================
 # KL divergence over time
 # ==============================
 
@@ -1146,3 +1211,4 @@ fig_pdf_final.suptitle(f'Final Reachable Set PDF: {modelString}')
 fig_pdf_final.tight_layout()
 plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
 plt.close(fig_pdf_final)
+
