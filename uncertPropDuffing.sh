@@ -9,20 +9,29 @@ else
     echo "Dataset already exists. Skipping generation."
 fi
 
+if [ "$1" == "pdf" ]; then
+    echo "PDF flag is set. Passing --pdf to scripts."
+    pdf_flag="--pdf"
+else
+    echo "PDF flag is not set. Running without --pdf."
+    pdf_flag=""
+fi
+
+
 # 1 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --jetson
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --model lstm --jetson 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --jetson $pdf_flag
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 50 --model lstm --jetson $pdf_flag
 
 
 # 4 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --jetson --batch 32
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --model lstm --jetson 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --jetson --batch 32 $pdf_flag
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 200 --model lstm --jetson $pdf_flag
 
 
 # 8 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --jetson --batch 32
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --model lstm --jetson 
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --jetson --batch 32 $pdf_flag
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 400 --model lstm --jetson $pdf_flag
 
 # 12 second train time
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --jetson --batch 32
-python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --model lstm --jetson
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --jetson --batch 32 $pdf_flag
+python scripts/reachabilityDuffing.py --train-ratio 0.8 --train-timesteps 600 --model lstm --jetson $pdf_flag
