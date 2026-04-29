@@ -100,7 +100,7 @@ n_epochs = args.n_epochs
 lr = args.lr
 input_size = problemDim
 output_size = problemDim
-num_layers = 1
+num_layers = args.layers
 lookback = args.lookback
 horizon = args.horizon
 train_timesteps = args.train_timesteps
@@ -249,7 +249,7 @@ else:
 loader = data.DataLoader(data.TensorDataset(train_in, train_out), shuffle=True, batch_size=args.batch)
 
 # initilizing the model, criterion, and optimizer for the data
-config = MambaConfig(d_model=problemDim, n_layers=num_layers,d_conv=16)
+config = MambaConfig(d_model=problemDim, n_layers=num_layers,d_conv=16,d_state=16)
 
 def returnModel(modelString = 'mamba'):
     if modelString == 'mamba':
@@ -709,6 +709,7 @@ def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
 # Plots
 # ==============================
 
+
 # build time axis (seconds)
 t = np.arange(true_reach.shape[0])
 
@@ -718,6 +719,32 @@ vel_lbl = ['Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
 state_labels = pos_lbl + vel_lbl
 
 _pfx = "plots/" + modelString + f'_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
+
+# plot 3d initial distribution of initial conditions across all trajectories, colored by training and testing split
+
+if not args.dim:
+    if modelString.startswith('mamba'):
+        for i in range(numericResult.shape[0]):
+            numericResult[i, :, :] = nonDim2Dim6(numericResult[i, :, :])
+    else:
+        for i in range(numericResult.shape[1]):
+            numericResult[:, i, :] = nonDim2Dim6(numericResult[:, i, :])
+plt.figure(figsize=(8, 6))
+ax = plt.subplot(111, projection='3d')
+split_index = int(numericResult.shape[1] * args.train_ratio)
+train_init = numericResult[0, :split_index, :3]  # (num_train_trajs, 3)
+test_init = numericResult[0, split_index:, :3]   # (num_test_trajs, 3)
+ax.scatter(train_init[:, 0], train_init[:, 1], train_init[:, 2], s=10, alpha=0.4, label='Train Init', color='blue')
+ax.scatter(test_init[:, 0], test_init[:, 1], test_init[:, 2], s=10, alpha=0.1, label='Test Init', color='C1')
+ax.set_title(f"{args.orbit.upper()} Initial Conditions\n Propagation: {args.propMin}min, Train Size: {train_init.shape[0]}, Test Size: {test_init.shape[0]}")
+ax.set_xlabel(pos_lbl[0])
+ax.set_ylabel(pos_lbl[1])
+ax.set_zlabel(pos_lbl[2])
+ax.legend()
+plt.savefig(_pfx + f'_initial_conditions.{saveType}')
+plt.close()
+
+
 
 # plot projections of true and predicted reachability tubes for the selected trajectory index
 fig = plt.figure(figsize=(12, 8))
@@ -948,16 +975,6 @@ def _make_grid_3d(lo, hi):
 G0_pos, G1_pos, G2_pos, grid_pos = _make_grid_3d(pos_lo, pos_hi)
 G0_vel, G1_vel, G2_vel, grid_vel = _make_grid_3d(vel_lo, vel_hi)
 
-def _compute_kde_3d(pts, grid):
-    """Return KDE evaluated on grid; shape matches grid.shape (flattened)."""
-    if pts.shape[0] < 5:
-        return np.zeros(grid.shape[1])
-    try:
-        kde = gaussian_kde(pts.T)
-        return kde(grid)
-    except Exception:
-        return np.zeros(grid.shape[1])
-
 # ==============================
 # Marginal CDFs
 # ==============================
@@ -1023,6 +1040,7 @@ ax_cdf1.grid()
 plt.tight_layout()
 plt.savefig(_pfx + f'_combined_marginal_cdf.{saveType}')
 plt.close(fig_cdf1)
+
 # ==============================
 # KL divergence over time
 # ==============================
@@ -1030,18 +1048,73 @@ plt.close(fig_cdf1)
 _eps = 1e-10
 kl_pos_values = []
 kl_vel_values = []
+kl_6d_values = []
+
+from sklearn.neighbors import NearestNeighbors
+
+def kl_knn_6d(p_samples, q_samples, k=5):
+    """
+    k-NN estimator for KL divergence D(P||Q) in arbitrary dimensions.
+    Wang, Kulkarni, Verdú (2009).
+    https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
+
+    p_samples: (n, d)
+    q_samples: (m, d)
+    Returns scalar KL estimate.
+    """
+    n, d = p_samples.shape
+    m = q_samples.shape[0]
+
+    # k-NN distances within P
+    nn_p = NearestNeighbors(n_neighbors=k+1).fit(p_samples)
+    rk, _ = nn_p.kneighbors(p_samples)
+    rk = rk[:, k]  # k-th neighbor distance (exclude self)
+
+    # k-NN distances from P to Q
+    nn_q = NearestNeighbors(n_neighbors=k).fit(q_samples)
+    sk, _ = nn_q.kneighbors(p_samples)
+    sk = sk[:, k-1]  # k-th neighbor distance
+
+    # Wang et al. estimator
+    kl = (d / n) * np.sum(np.log(sk / rk)) + np.log(m / (n - 1))
+    return float(kl)
 
 print("Computing KL divergence over time (this may take a moment)...")
-for fi in range(n_frames):
-    p_pos = _compute_kde_3d(true_reach[fi, :, :3], grid_pos) + _eps
-    q_pos = _compute_kde_3d(pred_reach[fi, :, :3], grid_pos) + _eps
-    p_pos /= p_pos.sum(); q_pos /= q_pos.sum()
-    kl_pos_values.append(float(np.sum(p_pos * np.log(p_pos / q_pos))))
 
-    p_vel = _compute_kde_3d(true_reach[fi, :, 3:], grid_vel) + _eps
-    q_vel = _compute_kde_3d(pred_reach[fi, :, 3:], grid_vel) + _eps
-    p_vel /= p_vel.sum(); q_vel /= q_vel.sum()
-    kl_vel_values.append(float(np.sum(p_vel * np.log(p_vel / q_vel))))
+for fi in range(n_frames):
+    p = true_reach[fi, :, :]   # (n, 6)
+    q = pred_reach[fi, :, :]   # (n, 6)
+    
+    kl_6d = kl_knn_6d(p, q, k=5)
+    
+    kl_pos = kl_knn_6d(p[:, :3], q[:, :3], k=5)
+    kl_vel = kl_knn_6d(p[:, 3:], q[:, 3:], k=5)
+
+    kl_6d_values.append(kl_6d)
+    kl_pos_values.append(kl_pos)
+    kl_vel_values.append(kl_vel)
+
+# Legacy KDE-based KL (not used in final version due to slowness and instability in 6D with limited samples)
+# def _compute_kde_3d(pts, grid):
+#     """Return KDE evaluated on grid; shape matches grid.shape (flattened)."""
+#     if pts.shape[0] < 5:
+#         return np.zeros(grid.shape[1])
+#     try:
+#         kde = gaussian_kde(pts.T)
+#         return kde(grid)
+#     except Exception:
+#         return np.zeros(grid.shape[1])
+
+# for fi in range(n_frames):
+#     p_pos = _compute_kde_3d(true_reach[fi, :, :3], grid_pos) + _eps
+#     q_pos = _compute_kde_3d(pred_reach[fi, :, :3], grid_pos) + _eps
+#     p_pos /= p_pos.sum(); q_pos /= q_pos.sum()
+#     kl_pos_values.append(float(np.sum(p_pos * np.log(p_pos / q_pos))))
+
+#     p_vel = _compute_kde_3d(true_reach[fi, :, 3:], grid_vel) + _eps
+#     q_vel = _compute_kde_3d(pred_reach[fi, :, 3:], grid_vel) + _eps
+#     p_vel /= p_vel.sum(); q_vel /= q_vel.sum()
+#     kl_vel_values.append(float(np.sum(p_vel * np.log(p_vel / q_vel))))
 
 time_axis_anim = [i for i in range(n_frames)]
 
@@ -1069,6 +1142,18 @@ ax_kl_vel.legend()
 ax_kl_vel.grid()
 plt.savefig(_pfx + f'_final_kl_divergence_vel.{saveType}')
 plt.close(fig_kl_vel)
+
+fig_kl_6d, ax_kl_6d = plt.subplots(figsize=(10, 5))
+ax_kl_6d.plot(time_axis_anim, kl_6d_values, color='purple', label='KL 6D')
+if train_timesteps < n_frames:
+    ax_kl_6d.axvline(x=time_axis_anim[train_timesteps - 1], color='gray', linestyle='--', label='Train/Test boundary')
+ax_kl_6d.set_xlabel('Time (min)')
+ax_kl_6d.set_ylabel('KL Divergence (true || pred)')
+ax_kl_6d.set_title(f'Full 6D KL Divergence: {modelString} — KL={kl_6d_values[-1]:.4f}')
+ax_kl_6d.legend()
+ax_kl_6d.grid()
+plt.savefig(_pfx + f'_final_kl_divergence_6d.{saveType}')
+plt.close(fig_kl_6d)
 
 # Animated KL divergence
 fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
@@ -1217,3 +1302,31 @@ fig_pdf_final.tight_layout()
 plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
 plt.close(fig_pdf_final)
 
+
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import cross_val_score
+
+def classifier_test_6d(p_samples, q_samples):
+    """
+    AUC near 0.5: distributions indistinguishable.
+    AUC near 1.0: distributions clearly different.
+    Feature importances tell you which dims drive difference.
+    """
+    X = np.vstack([p_samples, q_samples])
+    y = np.array([0]*len(p_samples) + [1]*len(q_samples))
+    
+    clf = GradientBoostingClassifier(n_estimators=100)
+    auc = cross_val_score(clf, X, y, cv=5, scoring='roc_auc').mean()
+    clf.fit(X, y)
+    
+    return auc, clf.feature_importances_
+
+print('Testing KL divergence...')
+print(f"Final-frame KL divergence (6D k-NN estimator): {kl_6d_values[-1]:.4f}")
+
+print('Testing classifier-based distinguishability:')
+#  classifier is trying to learn a decision boundary between samples from dist P and samples from dist Q
+#  AUC near 0.5 means the classifier struggles to distinguish them, suggesting similar distributions.
+auc_final, feat_imp_final = classifier_test_6d(true_reach[-1], pred_reach[-1])
+print(f"Final-frame classifier AUC: {auc_final:.4f}.")
+print(f"Feature importances (pos_x, pos_y, pos_z, vel_x, vel_y, vel_z): {feat_imp_final}")
