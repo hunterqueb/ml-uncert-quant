@@ -1278,31 +1278,6 @@ if saveType != "pdf":  # skip animation for PDF output to save time
         anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
     plt.close(fig_pdf)
 
-# Static final-frame PDF snapshot
-fig_pdf_final = plt.figure(figsize=(14, 6))
-ax_pf_tp = fig_pdf_final.add_subplot(221, projection='3d')
-ax_pf_pp = fig_pdf_final.add_subplot(222, projection='3d')
-ax_pf_tv = fig_pdf_final.add_subplot(223, projection='3d')
-ax_pf_pv = fig_pdf_final.add_subplot(224, projection='3d')
-
-for _ax, pts, cm, lbl, lo, hi, xl, yl, zl in [
-    (ax_pf_tp, true_reach[-1, :, :3], 'Blues', 'True Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
-    (ax_pf_pp, pred_reach[-1, :, :3], 'Reds',  'Pred Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
-    (ax_pf_tv, true_reach[-1, :, 3:], 'Blues', 'True Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
-    (ax_pf_pv, pred_reach[-1, :, 3:], 'Reds',  'Pred Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
-]:
-    c = _density_colors(pts)
-    _ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=5, c=c, cmap=cm, vmin=0, vmax=1)
-    _ax.set_xlim(lo[0], hi[0]); _ax.set_ylim(lo[1], hi[1]); _ax.set_zlim(lo[2], hi[2])
-    _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
-    _ax.set_title(lbl)
-
-fig_pdf_final.suptitle(f'Final Reachable Set PDF: {modelString}')
-fig_pdf_final.tight_layout()
-plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
-plt.close(fig_pdf_final)
-
-
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import cross_val_score
 
@@ -1330,3 +1305,28 @@ print('Testing classifier-based distinguishability:')
 auc_final, feat_imp_final = classifier_test_6d(true_reach[-1], pred_reach[-1])
 print(f"Final-frame classifier AUC: {auc_final:.4f}.")
 print(f"Feature importances (pos_x, pos_y, pos_z, vel_x, vel_y, vel_z): {feat_imp_final}")
+
+# Static final-frame PDF snapshot
+fig_pdf_final = plt.figure(figsize=(14, 6))
+ax_pf_tp = fig_pdf_final.add_subplot(221, projection='3d')
+ax_pf_pp = fig_pdf_final.add_subplot(222, projection='3d')
+ax_pf_tv = fig_pdf_final.add_subplot(223, projection='3d')
+ax_pf_pv = fig_pdf_final.add_subplot(224, projection='3d')
+
+for _ax, pts, cm, lbl, lo, hi, xl, yl, zl in [
+    (ax_pf_tp, true_reach[-1, :, :3], 'Blues', 'True Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_pf_pp, pred_reach[-1, :, :3], 'Reds',  'Pred Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+    (ax_pf_tv, true_reach[-1, :, 3:], 'Blues', 'True Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+    (ax_pf_pv, pred_reach[-1, :, 3:], 'Reds',  'Pred Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+]:
+    c = _density_colors(pts)
+    _ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=5, c=c, cmap=cm, vmin=0, vmax=1)
+    _ax.set_xlim(lo[0], hi[0]); _ax.set_ylim(lo[1], hi[1]); _ax.set_zlim(lo[2], hi[2])
+    _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
+    _ax.set_title(lbl)
+
+fig_pdf_final.suptitle(f'Final Reachable Set PDF: {modelString}\n KL Divergence: {kl_6d_values[-1]:.4f} — AUC: {auc_final:.4f}')
+fig_pdf_final.tight_layout()
+plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
+plt.close(fig_pdf_final)
+
