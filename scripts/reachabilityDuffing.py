@@ -674,6 +674,19 @@ area_ratio = (area_pred) / area_true if area_true > 0 else float('inf')
 
 print(f"True Alpha-Shape Area: {area_true:.4f}, Pred Alpha-Shape Area: {area_pred:.4f}, Area Ratio (Pred/True): {area_ratio:.4f}")
 
+plt.figure(figsize=(8, 6))
+split_index = int(numericResult.shape[1] * args.train_ratio)
+train_init = numericResult[0, :split_index, :]  # (num_train_trajs, 2)
+test_init = numericResult[0, split_index:, :]   # (num_test_trajs, 2)
+plt.scatter(train_init[:, 0], train_init[:, 1], s=10, alpha=0.4, label='Train Initial States', color='blue')
+plt.scatter(test_init[:, 0], test_init[:, 1], s=10, alpha=0.1, label='Test Initial States', color='C1')
+plt.title(f"Duffing Oscillator Initial Conditions\n Train Size: {train_init.shape[0]}, Test Size: {test_init.shape[0]}")
+plt.xlabel('x')
+plt.ylabel('xdot')
+plt.legend()
+plt.savefig("plots/"+modelString+f'_initial_conditions_ratio_{args.train_ratio}_prediction_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+plt.close()
+
 
 fig = plt.figure()
 ax = fig.add_subplot(111)
