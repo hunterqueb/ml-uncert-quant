@@ -269,6 +269,25 @@ optimizer = Adam_mini(model,lr=lr)
 criterion = F.smooth_l1_loss
 criterion = torch.nn.HuberLoss()
 
+def weighted_huber_state_loss(y_pred, y_true, pos_weight = 0.5, vel_weight=1):
+    # best for this problem for both models - pos_weight = 0.5, vel_weight=1
+
+    # y_pred, y_true: (batch, D) where D=6 with [x,y,z,vx,vy,vz]
+    pos_pred = y_pred[:, :1]
+    vel_pred = y_pred[:, 1:2]
+    pos_true = y_true[:, :1]
+    vel_true = y_true[:, 1:2]
+
+    huber_pos = torch.nn.HuberLoss()(pos_pred, pos_true)
+    huber_vel = torch.nn.HuberLoss()(vel_pred, vel_true)
+
+    # Combine losses with weighting
+    loss = pos_weight * huber_pos + vel_weight * huber_vel 
+    return loss
+
+criterion = weighted_huber_state_loss
+
+
 def trainMamba():
     trainTime = timer()
     for epoch in range(n_epochs):
