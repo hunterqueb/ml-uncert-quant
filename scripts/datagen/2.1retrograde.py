@@ -204,6 +204,8 @@ plt.grid()
 print("Shape of n_traj:", np.array(n_traj).shape)
 
 save_dir = "./data/cr3bp/"
+# ensure the save directory exists
+os.makedirs(save_dir, exist_ok=True)
 save_file = f"2.1_retrograde_geo_to_moon_obs-dt_{args.obs}_n_{args.n}_ND.npz"
 
 save_path = os.path.join(save_dir, save_file)
