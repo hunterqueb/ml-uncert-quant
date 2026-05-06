@@ -164,6 +164,9 @@ for i in range(args.n):
     n_traj.append(numericResult)
     t_arr.append(t)
 
+    # print the progress as an overwriting print statement
+    print(f"Progress: {i+1}/{args.n}", end='\r')
+
 n_traj = np.array(n_traj)
 t_arr = np.array(t_arr)
 n_traj_dim = nonDim2Dim4(n_traj, DU, TU)
