@@ -30,6 +30,7 @@ parser.add_argument('--traj-index', type=int, default=124, help='Trajectory inde
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
 parser.add_argument('--batch', type=int, default=256, help='Batch size for training')
 parser.add_argument('--batch-test', type=int, default=128, help='Batch size for evaluation')
+parser.add_argument('--traj-chunk', type=int, default=500, help='Max trajectories per forward pass during eval (reduce if OOM)')
 parser.add_argument('--n-epochs', type=int, default=10, help='Number of training epochs')
 parser.add_argument('--lr', type=float, default=0.01, help='Learning rate for training')
 parser.add_argument('--jetson', action='store_true', help='use flag to run on jetson with smaller test size')
@@ -324,18 +325,25 @@ def trainMamba():
                 targets = []
                 total_loss = 0.0
                 total_count = 0
+                traj_chunk = args.traj_chunk
                 for xb, yb in loader_eval:
-                    xb = xb.to(device)
-                    yb = yb.to(device)
-                    # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
+                    # xb: (batch, L, num_trajs, D)
                     b, L, T, D_sz = xb.shape
-                    xb_mamba = xb.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-                    yb_flat = yb.reshape(b * T, D_sz)
-                    pred = model(xb_mamba)[-1]  # (b*T, D)
-                    batch_loss = criterion(pred, yb_flat).detach()
-                    total_loss += batch_loss.item() * (b * T)
-                    total_count += b * T
-                    preds.append(pred.reshape(b, T, D_sz).cpu())
+                    pred_chunks = []
+                    for t0 in range(0, T, traj_chunk):
+                        t1 = min(t0 + traj_chunk, T)
+                        xb_c = xb[:, :, t0:t1, :].to(device)  # (b, L, tc, D)
+                        yb_c = yb[:, t0:t1, :].to(device)      # (b, tc, D)
+                        tc = t1 - t0
+                        xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
+                        yb_flat = yb_c.reshape(b * tc, D_sz)
+                        pred_c = model(xb_mamba)[-1]  # (b*tc, D)
+                        batch_loss = criterion(pred_c, yb_flat).detach()
+                        total_loss += batch_loss.item() * (b * tc)
+                        total_count += b * tc
+                        pred_chunks.append(pred_c.reshape(b, tc, D_sz).cpu())
+                    pred = torch.cat(pred_chunks, dim=1)  # (b, T, D)
+                    preds.append(pred)
                     targets.append(yb.cpu())
                 pred_all = torch.cat(preds, dim=0)    # (num_windows, num_trajs, D)
                 target_all = torch.cat(targets, dim=0)
@@ -451,15 +459,6 @@ def mambaEval():
         return np.concatenate([init, y_seq], axis=0)
 
     with torch.no_grad():
-        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-
-        xb, yb = next(iter(test_loader))
-        # xb: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
-        _b, _L, _T, _D = xb.shape
-        xb_mamba = xb.permute(1, 0, 2, 3).reshape(_L, _b * _T, _D).to(device)
-        pred = model(xb_mamba)[-1].cpu().numpy()   # (batch*num_trajs, D)
-        yb = yb.cpu().numpy()
-        xb = xb.cpu().numpy()
         traj_idx = traj_index
         def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
             loader_eval = data.DataLoader(
@@ -467,14 +466,19 @@ def mambaEval():
                 shuffle=False,
                 batch_size=batch_size,
             )
+            traj_chunk = args.traj_chunk
             preds = []
             for (xb_eval,) in loader_eval:
-                xb_eval = xb_eval.to(device)
-                # xb_eval: (batch, L, num_trajs, D) → (L, batch*num_trajs, D) for Mamba
                 b, L, T, D_sz = xb_eval.shape
-                xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-                pred = model(xb_mamba)[-1].cpu()  # (b*T, D)
-                pred = pred.reshape(b, T, D_sz)   # (batch, num_trajs, D)
+                pred_chunks = []
+                for t0 in range(0, T, traj_chunk):
+                    t1 = min(t0 + traj_chunk, T)
+                    xb_c = xb_eval[:, :, t0:t1, :].to(device)  # (b, L, tc, D)
+                    tc = t1 - t0
+                    xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
+                    pred_c = model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz)
+                    pred_chunks.append(pred_c)
+                pred = torch.cat(pred_chunks, dim=1)  # (b, T, D)
                 if slice_traj_idx is not None:
                     pred = pred[:, slice_traj_idx, :]  # (batch, D)
                 preds.append(pred)
@@ -619,12 +623,18 @@ if modelString.startswith('mamba'):
         X_tr_pred = torch.tensor(np.stack(xs_tr, axis=0)).float()  # (W_tr_pred, lookback, n_test_trajs, D)
         with torch.no_grad():
             model.eval()
+            traj_chunk = args.traj_chunk
             tr_preds = []
             for (xb_eval,) in data.DataLoader(data.TensorDataset(X_tr_pred), shuffle=False, batch_size=args.batch_test):
-                xb_eval = xb_eval.to(device)
                 b, L, T, D_sz = xb_eval.shape
-                xb_mamba = xb_eval.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-                tr_preds.append(model(xb_mamba)[-1].cpu().reshape(b, T, D_sz))
+                pred_chunks = []
+                for t0 in range(0, T, traj_chunk):
+                    t1 = min(t0 + traj_chunk, T)
+                    xb_c = xb_eval[:, :, t0:t1, :].to(device)
+                    tc = t1 - t0
+                    xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
+                    pred_chunks.append(model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz))
+                tr_preds.append(torch.cat(pred_chunks, dim=1))  # (b, T, D)
             train_pred_wins = torch.cat(tr_preds, dim=0).numpy()  # (W_tr_pred, n_test_trajs, D)
         pred_train_prefix = np.concatenate([test_trajs_train_time[:lookback], train_pred_wins], axis=0)
     else:
