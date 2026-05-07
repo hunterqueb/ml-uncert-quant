@@ -18,3 +18,8 @@ python scripts/reachability2BP.py --train-ratio 0.1 --model lstm --train-timeste
 # 200-2hr train time
 python scripts/reachability3BP.py --train-ratio 0.1 --train-timesteps 100 --lookback 10 --batch 8 $pdf_flag
 python scripts/reachability3BP.py --train-ratio 0.1 --train-timesteps 100 --lookback 10 --model lstm $pdf_flag
+
+# move all pdf files to a separate directory + timestamp of execution
+directory=$(date +%Y-%m-%d_%H-%M-%S)
+mkdir -p plots/DDDAS/$directory
+mv plots/*.pdf plots/DDDAS/$directory
