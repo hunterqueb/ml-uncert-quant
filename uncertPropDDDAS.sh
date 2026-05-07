@@ -15,3 +15,6 @@ python scripts/reachability2BP.py --train-ratio 0.1 --train-timesteps 90 --propM
 python scripts/reachability2BP.py --train-ratio 0.1 --model lstm --train-timesteps 80 --propMin 450 $pdf_flag
 
 # 3bp -- still need to find appropriate parameters
+# 200-2hr train time
+python scripts/reachability3BP.py --train-ratio 0.1 --train-timesteps 100 --lookback 10 --batch 8 $pdf_flag
+python scripts/reachability3BP.py --train-ratio 0.1 --train-timesteps 100 --lookback 10 --model lstm $pdf_flag
