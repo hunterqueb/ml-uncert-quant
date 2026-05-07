@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+import pandas as pd
+import seaborn as sns
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
@@ -43,6 +45,7 @@ parser.add_argument('--hidden', type=int, default=32, help='Hidden size for LSTM
 parser.add_argument('--layers', type=int, default=1, help='Number of layers for LSTM')
 parser.add_argument('--dropout', type=float, default=0.1, help='Dropout for LSTM')
 parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping norm for LSTM')
+parser.add_argument('--sigma-levels', type=int, default=4, help='Number of sigma levels for uncertainty visualization')
 
 args = parser.parse_args()
 modelString = args.model
@@ -705,6 +708,15 @@ def alpha_shape_area(points):
 # ==============================
 
 
+sns.set_theme(style='whitegrid', palette='muted')
+
+# 2D sigma contour levels: fraction of probability mass enclosed within k-sigma
+# Uses chi-squared CDF with 2 dof: P = 1 - exp(-k^2 / 2)
+# Capped at 3-sigma: beyond that the KDE has ~0 density with O(1000) samples,
+# causing duplicate contour levels that matplotlib rejects.
+_sigma_levels = [1 - np.exp(-k**2 / 2) for k in range(1, args.sigma_levels + 1)]
+_palette_dist = {'True': 'steelblue', 'Predicted': 'tomato'}
+
 # build time axis (seconds)
 t = np.arange(true_reach.shape[0])
 
@@ -812,14 +824,15 @@ time_steps_axis = np.arange(true_reach.shape[0])
 fig, axs = plt.subplots(2, 2, figsize=(15, 10))
 for i in range(problemDim):
     ax = axs[i // 2, i % 2]
-    ax.plot(time_steps_axis, true_reach[:, traj_idx, i], label='True', color='blue')
-    ax.plot(time_steps_axis, pred_reach[:, traj_idx, i], label='Predicted', color='orange')
-    # add vertical line for train/test split
-    split_time = int(train_timesteps)
-    ax.axvline(x=split_time, color='gray', linestyle='--', label='Train/Test Split')
+    _df_tc = pd.DataFrame({
+        'Time (hr)': np.tile(time_steps_axis, 2),
+        state_labels[i]: np.concatenate([true_reach[:, traj_idx, i], pred_reach[:, traj_idx, i]]),
+        'Source': ['True'] * len(time_steps_axis) + ['Predicted'] * len(time_steps_axis),
+    })
+    sns.lineplot(data=_df_tc, x='Time (hr)', y=state_labels[i], hue='Source',
+                 palette={'True': 'steelblue', 'Predicted': 'tomato'}, ax=ax)
+    ax.axvline(x=int(train_timesteps), color='gray', linestyle='--', label='Train/Test Split')
     ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
-    ax.set_xlabel('Time (hr)')
-    ax.set_ylabel(state_labels[i])
     ax.legend()
 plt.tight_layout()
 plt.savefig(_pfx + f'_state_components_traj_{traj_idx}.{saveType}')
@@ -894,26 +907,32 @@ ax.legend()
 plt.savefig(_pfx + f'_final_state_vel_alpha_shape.{saveType}')
 plt.close()
 
-# 2D final-state scatter only — positions
-fig, ax = plt.subplots(figsize=(8, 7))
-ax.scatter(final_true_pos[:, 0], final_true_pos[:, 1], s=6, alpha=0.4, c='k', label='True Final Pos')
-ax.scatter(final_pred_pos[:, 0], final_pred_pos[:, 1], s=6, alpha=0.4, c='r', marker='x', label='Pred Final Pos')
-ax.scatter((1-mu)*DU, 0, s=26, c='g', marker='o', label='Moon')
-ax.set_title(f'{modelString} Final-State Positions')
-ax.set_xlabel(pos_lbl[0])
-ax.set_ylabel(pos_lbl[1])
-ax.legend()
+# Final-state positions — seaborn KDE + scatter
+_df_fpos = pd.DataFrame(np.vstack([final_true_pos, final_pred_pos]), columns=pos_lbl)
+_df_fpos['Distribution'] = ['True'] * len(final_true_pos) + ['Predicted'] * len(final_pred_pos)
+fig_pos2d, ax_pos2d = plt.subplots(figsize=(8, 7))
+sns.kdeplot(data=_df_fpos, x=pos_lbl[0], y=pos_lbl[1], hue='Distribution', ax=ax_pos2d,
+            levels=6, alpha=0.8, palette=_palette_dist)
+sns.scatterplot(data=_df_fpos, x=pos_lbl[0], y=pos_lbl[1], hue='Distribution', ax=ax_pos2d,
+                alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+ax_pos2d.scatter((1-mu)*DU, 0, s=26, c='g', marker='o', label='Moon', zorder=5)
+ax_pos2d.set_title(f'{modelString} Final-State Positions')
+ax_pos2d.legend()
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
 plt.close()
 
-# 2D final-state scatter only — velocities
-fig, ax = plt.subplots(figsize=(8, 7))
-ax.scatter(final_true_vel[:, 0], final_true_vel[:, 1], s=6, alpha=0.4, c='k', label='True Final Vel')
-ax.scatter(final_pred_vel[:, 0], final_pred_vel[:, 1], s=6, alpha=0.4, c='r', marker='x', label='Pred Final Vel')
-ax.set_title(f'{modelString} Final-State Velocities')
-ax.set_xlabel(vel_lbl[0])
-ax.set_ylabel(vel_lbl[1])
-ax.legend()
+# Final-state velocities — seaborn KDE + scatter
+_df_fvel = pd.DataFrame(np.vstack([final_true_vel, final_pred_vel]), columns=vel_lbl)
+_df_fvel['Distribution'] = ['True'] * len(final_true_vel) + ['Predicted'] * len(final_pred_vel)
+fig_vel2d, ax_vel2d = plt.subplots(figsize=(8, 7))
+sns.kdeplot(data=_df_fvel, x=vel_lbl[0], y=vel_lbl[1], hue='Distribution', ax=ax_vel2d,
+            levels=6, alpha=0.8, palette=_palette_dist)
+sns.scatterplot(data=_df_fvel, x=vel_lbl[0], y=vel_lbl[1], hue='Distribution', ax=ax_vel2d,
+                alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+ax_vel2d.set_title(f'{modelString} Final-State Velocities')
+ax_vel2d.legend()
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
 plt.close()
 
@@ -1035,21 +1054,16 @@ dist_pred_vel = np.linalg.norm(pts_pred_4d[:, 2:] - centroid_true_vel, axis=1)
 
 fig_cdf, (ax_pos_cdf, ax_vel_cdf) = plt.subplots(1, 2, figsize=(14, 6))
 for ax, d_true, d_pred, xlabel, title in [
-    (ax_pos_cdf, dist_true_pos, dist_pred_pos,
-     'Distance from centroid (km)', 'Position CDF'),
-    (ax_vel_cdf, dist_true_vel, dist_pred_vel,
-     'Distance from centroid (km/s)', 'Velocity CDF'),
+    (ax_pos_cdf, dist_true_pos, dist_pred_pos, 'Distance from centroid (km)', 'Position CDF'),
+    (ax_vel_cdf, dist_true_vel, dist_pred_vel, 'Distance from centroid (km/s)', 'Velocity CDF'),
 ]:
-    x_true_s = np.sort(d_true)
-    x_pred_s = np.sort(d_pred)
-    cdf = np.arange(1, len(x_true_s) + 1) / len(x_true_s)
-    ax.plot(x_true_s, cdf, color='steelblue', label='True')
-    ax.plot(x_pred_s, cdf, color='tomato', label='Pred')
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel('Cummulative Probability')
+    _df_cdf = pd.DataFrame({
+        xlabel: np.concatenate([d_true, d_pred]),
+        'Distribution': ['True'] * len(d_true) + ['Predicted'] * len(d_pred),
+    })
+    sns.ecdfplot(data=_df_cdf, x=xlabel, hue='Distribution', ax=ax, palette=_palette_dist)
+    ax.set_ylabel('Cumulative Probability')
     ax.set_title(title)
-    ax.legend()
-    ax.grid()
 
 fig_cdf.suptitle(f'{modelString} Reachable Set CDF (Final State)')
 plt.tight_layout()
@@ -1064,18 +1078,15 @@ sig_4d = np.where(pts_true_4d.std(axis=0) < 1e-8, 1.0, pts_true_4d.std(axis=0))
 pooled_true = ((pts_true_4d - mu_4d) / sig_4d).ravel()
 pooled_pred = ((pts_pred_4d - mu_4d) / sig_4d).ravel()
 
+_df_cdf1 = pd.DataFrame({
+    'Normalized state value (σ from true mean)': np.concatenate([pooled_true, pooled_pred]),
+    'Distribution': ['True'] * len(pooled_true) + ['Predicted'] * len(pooled_pred),
+})
 fig_cdf1, ax_cdf1 = plt.subplots(figsize=(10, 6))
-ax_cdf1.plot(np.sort(pooled_true),
-             np.arange(1, len(pooled_true) + 1) / len(pooled_true),
-             color='steelblue', label='True')
-ax_cdf1.plot(np.sort(pooled_pred),
-             np.arange(1, len(pooled_pred) + 1) / len(pooled_pred),
-             color='tomato', label='Pred')
-ax_cdf1.set_xlabel('Normalized state value (σ from true mean)')
-ax_cdf1.set_ylabel('Cummulative Probability')
+sns.ecdfplot(data=_df_cdf1, x='Normalized state value (σ from true mean)', hue='Distribution',
+             ax=ax_cdf1, palette=_palette_dist)
+ax_cdf1.set_ylabel('Cumulative Probability')
 ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)')
-ax_cdf1.legend()
-ax_cdf1.grid()
 plt.tight_layout()
 plt.savefig(_pfx + f'_combined_marginal_cdf.{saveType}')
 plt.close(fig_cdf1)
@@ -1084,7 +1095,6 @@ plt.close(fig_cdf1)
 # KL divergence over time
 # ==============================
 
-_eps = 1e-10
 kl_pos_values = []
 kl_vel_values = []
 kl_6d_values = []
@@ -1157,40 +1167,40 @@ for fi in range(n_frames):
 
 time_axis_anim = [i for i in range(n_frames)]
 
-# Static KL divergence plots (position and velocity separate)
+# Static KL divergence plots
+_df_kl = pd.DataFrame({'Time (hr)': time_axis_anim, 'KL Divergence (true || pred)': kl_pos_values})
 fig_kl_pos, ax_kl_pos = plt.subplots(figsize=(10, 5))
-ax_kl_pos.plot(time_axis_anim, kl_pos_values, color='steelblue', label='KL Position')
+sns.lineplot(data=_df_kl, x='Time (hr)', y='KL Divergence (true || pred)',
+             ax=ax_kl_pos, color='steelblue', label='KL Position')
 if train_timesteps < n_frames:
     ax_kl_pos.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_pos.set_xlabel('Time (hr)')
-ax_kl_pos.set_ylabel('KL Divergence (true || pred)')
 ax_kl_pos.set_title(f'Final Position KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}')
 ax_kl_pos.legend()
-ax_kl_pos.grid()
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_kl_divergence_pos.{saveType}')
 plt.close(fig_kl_pos)
 
+_df_kl_vel = pd.DataFrame({'Time (hr)': time_axis_anim, 'KL Divergence (true || pred)': kl_vel_values})
 fig_kl_vel, ax_kl_vel = plt.subplots(figsize=(10, 5))
-ax_kl_vel.plot(time_axis_anim, kl_vel_values, color='tomato', label='KL Velocity')
+sns.lineplot(data=_df_kl_vel, x='Time (hr)', y='KL Divergence (true || pred)',
+             ax=ax_kl_vel, color='tomato', label='KL Velocity')
 if train_timesteps < n_frames:
     ax_kl_vel.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_vel.set_xlabel('Time (hr)')
-ax_kl_vel.set_ylabel('KL Divergence (true || pred)')
 ax_kl_vel.set_title(f'Final Velocity KL Divergence: {modelString} — Vel KL={kl_vel_values[-1]:.4f}')
 ax_kl_vel.legend()
-ax_kl_vel.grid()
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_kl_divergence_vel.{saveType}')
 plt.close(fig_kl_vel)
 
+_df_kl_4d = pd.DataFrame({'Time (hr)': time_axis_anim, 'KL Divergence (true || pred)': kl_6d_values})
 fig_kl_6d, ax_kl_6d = plt.subplots(figsize=(10, 5))
-ax_kl_6d.plot(time_axis_anim, kl_6d_values, color='purple', label='KL 6D')
+sns.lineplot(data=_df_kl_4d, x='Time (hr)', y='KL Divergence (true || pred)',
+             ax=ax_kl_6d, color='purple', label='KL 4D')
 if train_timesteps < n_frames:
     ax_kl_6d.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_6d.set_xlabel('Time (hr)')
-ax_kl_6d.set_ylabel('KL Divergence (true || pred)')
 ax_kl_6d.set_title(f'Full 4D KL Divergence: {modelString} — KL={kl_6d_values[-1]:.4f}')
 ax_kl_6d.legend()
-ax_kl_6d.grid()
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_kl_divergence_6d.{saveType}')
 plt.close(fig_kl_6d)
 
@@ -1345,27 +1355,49 @@ auc_final, feat_imp_final = classifier_test_6d(true_reach[-1], pred_reach[-1])
 print(f"Final-frame classifier AUC: {auc_final:.4f}.")
 print(f"Feature importances (pos_x, pos_y, vel_x, vel_y): {feat_imp_final}")
 
-# Static final-frame PDF snapshot
-fig_pdf_final, axs_pf = plt.subplots(2, 2, figsize=(14, 10))
-ax_pf_tp = axs_pf[0, 0]
-ax_pf_pp = axs_pf[0, 1]
-ax_pf_tv = axs_pf[1, 0]
-ax_pf_pv = axs_pf[1, 1]
-
-for _ax, pts, cm, lbl, lo, hi, xl, yl in [
-    (ax_pf_tp, true_reach[-1, :, :2], 'Blues', 'True Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1]),
-    (ax_pf_pp, pred_reach[-1, :, :2], 'Reds',  'Pred Position PDF', pos_lo, pos_hi, pos_lbl[0], pos_lbl[1]),
-    (ax_pf_tv, true_reach[-1, :, 2:], 'Blues', 'True Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1]),
-    (ax_pf_pv, pred_reach[-1, :, 2:], 'Reds',  'Pred Velocity PDF', vel_lo, vel_hi, vel_lbl[0], vel_lbl[1]),
+# Static final-frame PDF snapshot — seaborn KDE overlays
+fig_pdf_final, (ax_pf_pos, ax_pf_vel) = plt.subplots(1, 2, figsize=(14, 6))
+for ax, pts_true, pts_pred, lbls in [
+    (ax_pf_pos, true_reach[-1, :, :2], pred_reach[-1, :, :2], pos_lbl),
+    (ax_pf_vel, true_reach[-1, :, 2:], pred_reach[-1, :, 2:], vel_lbl),
 ]:
-    c = _density_colors(pts)
-    _ax.scatter(pts[:, 0], pts[:, 1], s=5, c=c, cmap=cm, vmin=0, vmax=1)
-    _ax.set_xlim(lo[0], hi[0]); _ax.set_ylim(lo[1], hi[1])
-    _ax.set_xlabel(xl); _ax.set_ylabel(yl)
-    _ax.set_title(lbl)
+    _df_fp = pd.DataFrame(np.vstack([pts_true, pts_pred]), columns=lbls)
+    _df_fp['Distribution'] = ['True'] * len(pts_true) + ['Predicted'] * len(pts_pred)
+    sns.kdeplot(data=_df_fp, x=lbls[0], y=lbls[1], hue='Distribution', ax=ax,
+                levels=6, alpha=0.8, palette=_palette_dist)
+    sns.scatterplot(data=_df_fp, x=lbls[0], y=lbls[1], hue='Distribution', ax=ax,
+                    alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
 
-fig_pdf_final.suptitle(f'Final Reachable Set PDF: {modelString}\n KL Divergence: {kl_6d_values[-1]:.4f} — AUC: {auc_final:.4f}')
-fig_pdf_final.tight_layout()
+fig_pdf_final.suptitle(
+    f'Final Reachable Set PDF: {modelString}\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
+)
+plt.tight_layout()
 plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
 plt.close(fig_pdf_final)
+
+
+# ==============================
+# Seaborn pairplot: true vs predicted final-state distributions
+# ==============================
+
+_df_true = pd.DataFrame(final_true, columns=state_labels)
+_df_true['Distribution'] = 'True'
+_df_pred = pd.DataFrame(final_pred, columns=state_labels)
+_df_pred['Distribution'] = 'Predicted'
+_df_pair = pd.concat([_df_true, _df_pred], ignore_index=True)
+
+fig_pair = sns.pairplot(
+    _df_pair,
+    hue='Distribution',
+    plot_kws={'alpha': 0.3, 's': 8, 'rasterized': True},
+    diag_kws={'rasterized': True},
+    diag_kind='kde',
+    palette={'True': 'steelblue', 'Predicted': 'tomato'},
+)
+fig_pair.figure.suptitle(
+    f'{modelString} Final-State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
+    y=1.01,
+)
+fig_pair.savefig(_pfx + f'_final_state_pairplot.{saveType}', bbox_inches='tight')
+plt.close(fig_pair.figure)
 
