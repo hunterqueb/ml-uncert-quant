@@ -117,6 +117,7 @@ if len(geo_indices) > 0:
     print("First GEO index:", first_geo_index)
 
 IC_GEO = numericResult[first_geo_index, :]
+print("IC_GEO in non-dimensional units:", IC_GEO)
 print("IC_GEO in km and km/s",nonDim2Dim4(IC_GEO.reshape(1,problemDim),DU,TU))
 # apply std to IC_GEO
 IC_GEO_noisy = IC_GEO + np.random.normal(-1, 1, problemDim) * std
@@ -124,7 +125,7 @@ print("IC_GEO_noisy in km and km/s",nonDim2Dim4(IC_GEO_noisy.reshape(1,problemDi
 
 # found this value by trial and error
 t0 = 0; tf = tEnd  * 0.722
-
+print('simulation time:', tf*TU/86400, 'days')
 # set delT to be approximately 4 hr in non-dimensional units
 delT = args.obs * 3600 / TU
 
@@ -146,7 +147,36 @@ plt.ylabel('y (non-dimensional)')
 plt.legend()
 plt.grid()
 
+def synodic_to_eci(ic, t, mu=mu):
+    """Convert a 2D CR3BP synodic (rotating) state to Earth-centered inertial.
 
+    ic : (..., 4) array  [x, y, xdot, ydot] in non-dimensional synodic coords
+    t  : non-dimensional time (scalar or broadcastable array)
+    Returns an array of the same shape in ECI non-dimensional coords.
+    """
+    theta = t  # ω = 1 in non-dim units
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+
+    x_ec = ic[..., 0] + mu
+    y_ec = ic[..., 1]
+    xdot_rot = ic[..., 2]
+    ydot_rot = ic[..., 3]
+
+    x_eci  =  x_ec * cos_t - y_ec * sin_t
+    y_eci  =  x_ec * sin_t + y_ec * cos_t
+    vx_eci = (xdot_rot - y_ec) * cos_t - (ydot_rot + x_ec) * sin_t
+    vy_eci = (xdot_rot - y_ec) * sin_t + (ydot_rot + x_ec) * cos_t
+
+    return np.stack([x_eci, y_eci, vx_eci, vy_eci], axis=-1)
+
+# convert IC_GEO to ECI frame from 3BP frame
+nSamples_traj = int(np.ceil(tEnd / 0.001))
+t_geo = np.linspace(0, tEnd, nSamples_traj)[first_geo_index]
+
+IC_GEO_ECI = synodic_to_eci(IC_GEO, t_geo)
+print("IC_GEO in ECI (non-dim):", IC_GEO_ECI)
+print("IC_GEO in ECI (km and km/s):", nonDim2Dim4(IC_GEO_ECI.reshape(1, problemDim), DU, TU))
+print("IC_GEO total distance from Earth (km):", np.linalg.norm(IC_GEO_ECI[:2]) * DU)
 
 n_traj = []
 t_arr = []
