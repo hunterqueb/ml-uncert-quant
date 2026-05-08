@@ -599,7 +599,7 @@ if modelString.startswith('mamba'):
     getSuperWeight(model)
     plotSuperWeight(model)
     plotSuperActivation(magnitude, index,printOutValues=True)
-    plt.title("Mamba Reachability Super Activations")
+    plt.title("Mamba Super Activations")
     plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 
 
@@ -788,14 +788,14 @@ plt.close()
 # plot projections of true and predicted reachability tubes for the selected trajectory index
 fig = plt.figure(figsize=(12, 8))
 ax = fig.add_subplot(111, projection='3d')
-ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Reachability', color='blue')
-ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Reachability', color='orange')
-ax.set_title(f"{modelString.upper()} Reachability Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
+ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Trajectory', color='blue')
+ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Trajectory', color='orange')
+ax.set_title(f"{modelString.upper()} Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
 ax.set_xlabel(pos_lbl[0])
 ax.set_ylabel(pos_lbl[1])
 ax.set_zlabel(pos_lbl[2])
 ax.legend()
-plt.savefig(_pfx + f'_reachability_traj_{traj_idx}.{saveType}')
+plt.savefig(_pfx + f'_traj_{traj_idx}.{saveType}')
 plt.close()
 
 # plot each state component over time for the selected trajectory index
@@ -846,7 +846,7 @@ true_poly_pos = Poly3DCollection(true_faces_pos, alpha=0.12, facecolor='steelblu
 pred_poly_pos = Poly3DCollection(pred_faces_pos, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
 ax.add_collection3d(true_poly_pos)
 ax.add_collection3d(pred_poly_pos)
-ax.set_title(f'{modelString} Final-State Positions Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_pos:.4f}')
+ax.set_title(f'{modelString} Final State Positions Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_pos:.4f}')
 ax.set_xlabel(pos_lbl[0])
 ax.set_ylabel(pos_lbl[1])
 ax.set_zlabel(pos_lbl[2])
@@ -863,7 +863,7 @@ true_poly_vel = Poly3DCollection(true_faces_vel, alpha=0.12, facecolor='steelblu
 pred_poly_vel = Poly3DCollection(pred_faces_vel, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
 ax.add_collection3d(true_poly_vel)
 ax.add_collection3d(pred_poly_vel)
-ax.set_title(f'{modelString} Final-State Velocities Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_vel:.4f}')
+ax.set_title(f'{modelString} Final State Velocities Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_vel:.4f}')
 ax.set_xlabel(vel_lbl[0])
 ax.set_ylabel(vel_lbl[1])
 ax.set_zlabel(vel_lbl[2])
@@ -887,7 +887,7 @@ for ax, (i, j) in zip(axes_pos2d, _proj_pairs):
                 levels=6, alpha=0.8, palette=_palette_dist)
     sns.scatterplot(data=_df_fpos, x=xl, y=yl, hue='Distribution', ax=ax,
                     alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
-fig_pos2d.suptitle(f'{modelString} Final-State Positions')
+fig_pos2d.suptitle(f'{modelString} Final State Positions')
 plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
 plt.close()
@@ -905,7 +905,7 @@ for ax, (i, j) in zip(axes_vel2d, _proj_pairs):
                 levels=6, alpha=0.8, palette=_palette_dist)
     sns.scatterplot(data=_df_fvel, x=xl, y=yl, hue='Distribution', ax=ax,
                     alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
-fig_vel2d.suptitle(f'{modelString} Final-State Velocities')
+fig_vel2d.suptitle(f'{modelString} Final State Velocities')
 plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
 plt.close()
@@ -1061,7 +1061,7 @@ for ax, d_true, d_pred, xlabel, title in [
     ax.set_ylabel('Cumulative Probability')
     ax.set_title(title)
 
-fig_cdf.suptitle(f'{modelString} Reachable Set CDF (Final State)')
+fig_cdf.suptitle(f'{modelString} Marginal Set CDF (Final State)')
 plt.tight_layout()
 plt.savefig(_pfx + f'_marginal_cdfs.{saveType}')
 plt.close(fig_cdf)
@@ -1288,7 +1288,7 @@ ax_pos_true_pdf.set_title('True Position PDF')
 ax_pos_pred_pdf.set_title('Pred Position PDF')
 ax_vel_true_pdf.set_title('True Velocity PDF')
 ax_vel_pred_pdf.set_title('Pred Velocity PDF')
-fig_pdf.suptitle(f'Reachable Set PDF Evolution: {modelString}')
+fig_pdf.suptitle(f'PDF Evolution: {modelString}')
 time_txt_pdf = fig_pdf.text(0.5, 0.01, '', ha='center', fontsize=11)
 
 # pre-build scatter artists with dummy data
@@ -1325,7 +1325,7 @@ if saveType != "pdf":  # skip animation for PDF output to save time
         frames=n_frames, interval=70, blit=False, repeat=False,
     )
     print("Saving PDF animation...")
-    out_pdf = _pfx + '_reachable_set_pdf'
+    out_pdf = _pfx + '_pdf'
     try:
         anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
     except Exception:
@@ -1384,10 +1384,10 @@ for row, (pts_true, pts_pred, lbls) in enumerate([
                         alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
 
 fig_pdf_final.suptitle(
-    f'Final Reachable Set PDF: {modelString}\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
+    f'Final State PDF: {modelString}'#\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
 )
 plt.tight_layout()
-plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
+plt.savefig(_pfx + f'_final_pdf.{saveType}')
 plt.close(fig_pdf_final)
 
 # ==============================
@@ -1409,7 +1409,7 @@ fig_pair = sns.pairplot(
     palette={'True': 'steelblue', 'Predicted': 'tomato'},
 )
 fig_pair.figure.suptitle(
-    f'{modelString} Final-State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
+    f'{modelString} Final State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
     y=1.01,
 )
 fig_pair.savefig(_pfx + f'_final_state_pairplot.{saveType}', bbox_inches='tight')

@@ -601,7 +601,7 @@ if modelString.startswith('mamba'):
     getSuperWeight(model)
     plotSuperWeight(model)
     plotSuperActivation(magnitude, index,printOutValues=True)
-    plt.title("Mamba Reachability Super Activations")
+    plt.title("Mamba Super Activations")
     plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 
 
@@ -765,25 +765,25 @@ print(ics_eci_dim.shape)
 ics_eci_dim_train = ics_eci_dim[:split_index, :]  # (num_train_trajs, 3)
 ics_eci_dim_test = ics_eci_dim[split_index:, :]   # (num_test_trajs, 3)
 
-plt.figure(figsize=(16, 10))
+plt.figure(figsize=(14, 10))
 # plot the initial conditions xy phase space next to xdot ydot phase space
 
 plt.subplot(1, 2, 1)
 plt.title('Initial Conditions: XY Phase Space')
-plt.scatter(ics_eci_dim_train[:, 0], ics_eci_dim_train[:, 1], c='r', marker='o', s=5,alpha=0.4, label='Train')
-plt.scatter(ics_eci_dim_test[:, 0], ics_eci_dim_test[:, 1], c='b', marker='o', s=5,alpha=0.1,label='Test')
+plt.scatter(ics_eci_dim_train[:, 0], ics_eci_dim_train[:, 1], c='blue', marker='o', s=5,alpha=0.4, label='Train Initial States')
+plt.scatter(ics_eci_dim_test[:, 0], ics_eci_dim_test[:, 1], c='C1', marker='o', s=5,alpha=0.1,label='Test Initial States')
 plt.xlabel('x ECI (km)')
 plt.ylabel('y ECI (km)')
-plt.grid()
+plt.grid(True)
 plt.legend()
 
 plt.subplot(1, 2, 2)
 plt.title('Initial Conditions: Xdot Ydot Phase Space')
-plt.scatter(ics_eci_dim_train[:, 2], ics_eci_dim_train[:, 3], c='r', marker='o', s=5,alpha=0.4, label='Train')
-plt.scatter(ics_eci_dim_test[:, 2], ics_eci_dim_test[:, 3], c='b', marker='o', s=5, alpha=0.1, label='Test')
+plt.scatter(ics_eci_dim_train[:, 2], ics_eci_dim_train[:, 3], c='blue', marker='o', s=5,alpha=0.4, label='Train Initial States')
+plt.scatter(ics_eci_dim_test[:, 2], ics_eci_dim_test[:, 3], c='C1', marker='o', s=5, alpha=0.1, label='Test Initial States')
 plt.xlabel('vx ECI (km/s)')
 plt.ylabel('vy ECI (km/s)')
-plt.grid()
+plt.grid(True)
 plt.legend()
 
 plt.suptitle('Dataset Initial Conditions for Retrograde Orbits in the Earth-Moon System')
@@ -807,16 +807,16 @@ if not args.dim:
 
 # plot projections of true and predicted reachability tubes for the selected trajectory index
 fig, ax = plt.subplots(figsize=(10, 8))
-ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], label='True Reachability', color='blue')
-ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], label='Predicted Reachability', color='orange')
+ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], label='True Trajectory', color='blue')
+ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], label='Predicted Trajectory', color='orange')
 ax.plot(true_reach[0, traj_idx, 0], true_reach[0, traj_idx, 1], 'rx', label='Initial Condition')
 ax.plot((1-mu)*DU, 0, 'go', label='Moon')
-ax.set_title(f"{modelString.upper()} Reachability Prediction for Trajectory {traj_idx}\nOrbit: {orbit.upper()}, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
+ax.set_title(f"{modelString.upper()} Prediction for Trajectory {traj_idx}\nOrbit: {orbit.upper()}, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
 ax.set_xlabel(pos_lbl[0])
 ax.set_ylabel(pos_lbl[1])
 ax.legend()
 plt.grid()
-plt.savefig(_pfx + f'_reachability_traj_{traj_idx}.{saveType}')
+plt.savefig(_pfx + f'_traj_{traj_idx}.{saveType}')
 plt.close()
 
 # plot each state component over time for the selected trajectory index
@@ -875,7 +875,7 @@ try:
         ax.plot(final_pred_pos[simplex, 0], final_pred_pos[simplex, 1], 'r-', alpha=0.5, linewidth=0.8)
 except QhullError:
     pass
-ax.set_title(f'{modelString} Final-State Positions Convex Hull\nArea Ratio (Pred/True): {area_ratio_pos:.4f}')
+ax.set_title(f'{modelString} Final State Positions Convex Hull\nArea Ratio (Pred/True): {area_ratio_pos:.4f}')
 ax.set_xlabel(pos_lbl[0])
 ax.set_ylabel(pos_lbl[1])
 ax.legend()
@@ -900,7 +900,7 @@ try:
         ax.plot(final_pred_vel[simplex, 0], final_pred_vel[simplex, 1], 'r-', alpha=0.5, linewidth=0.8)
 except QhullError:
     pass
-ax.set_title(f'{modelString} Final-State Velocities Convex Hull\nArea Ratio (Pred/True): {area_ratio_vel:.4f}')
+ax.set_title(f'{modelString} Final State Velocities Convex Hull\nArea Ratio (Pred/True): {area_ratio_vel:.4f}')
 ax.set_xlabel(vel_lbl[0])
 ax.set_ylabel(vel_lbl[1])
 ax.legend()
@@ -916,7 +916,7 @@ sns.kdeplot(data=_df_fpos, x=pos_lbl[0], y=pos_lbl[1], hue='Distribution', ax=ax
 sns.scatterplot(data=_df_fpos, x=pos_lbl[0], y=pos_lbl[1], hue='Distribution', ax=ax_pos2d,
                 alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
 ax_pos2d.scatter((1-mu)*DU, 0, s=26, c='g', marker='o', label='Moon', zorder=5)
-ax_pos2d.set_title(f'{modelString} Final-State Positions')
+ax_pos2d.set_title(f'{modelString} Final State Positions')
 ax_pos2d.legend()
 plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
@@ -930,7 +930,7 @@ sns.kdeplot(data=_df_fvel, x=vel_lbl[0], y=vel_lbl[1], hue='Distribution', ax=ax
             levels=6, alpha=0.8, palette=_palette_dist)
 sns.scatterplot(data=_df_fvel, x=vel_lbl[0], y=vel_lbl[1], hue='Distribution', ax=ax_vel2d,
                 alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
-ax_vel2d.set_title(f'{modelString} Final-State Velocities')
+ax_vel2d.set_title(f'{modelString} Final State Velocities')
 ax_vel2d.legend()
 plt.tight_layout()
 plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
@@ -1065,7 +1065,7 @@ for ax, d_true, d_pred, xlabel, title in [
     ax.set_ylabel('Cumulative Probability')
     ax.set_title(title)
 
-fig_cdf.suptitle(f'{modelString} Reachable Set CDF (Final State)')
+fig_cdf.suptitle(f'{modelString} Marginal CDF (Final State)')
 plt.tight_layout()
 plt.savefig(_pfx + f'_marginal_cdfs.{saveType}')
 plt.close(fig_cdf)
@@ -1283,7 +1283,7 @@ ax_pos_true_pdf.set_title('True Position PDF')
 ax_pos_pred_pdf.set_title('Pred Position PDF')
 ax_vel_true_pdf.set_title('True Velocity PDF')
 ax_vel_pred_pdf.set_title('Pred Velocity PDF')
-fig_pdf.suptitle(f'Reachable Set PDF Evolution: {modelString}')
+fig_pdf.suptitle(f'PDF Evolution: {modelString}')
 time_txt_pdf = fig_pdf.text(0.5, 0.01, '', ha='center', fontsize=11)
 
 # pre-build scatter artists with dummy data
@@ -1320,7 +1320,7 @@ if saveType != "pdf":  # skip animation for PDF output to save time
         frames=n_frames, interval=70, blit=False, repeat=False,
     )
     print("Saving PDF animation...")
-    out_pdf = _pfx + '_reachable_set_pdf'
+    out_pdf = _pfx + '_pdf'
     try:
         anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
     except Exception:
@@ -1369,10 +1369,10 @@ for ax, pts_true, pts_pred, lbls in [
                     alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
 
 fig_pdf_final.suptitle(
-    f'Final Reachable Set PDF: {modelString}\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
+    f'Final State PDF: {modelString}'#\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
 )
 plt.tight_layout()
-plt.savefig(_pfx + f'_final_reachable_set_pdf.{saveType}')
+plt.savefig(_pfx + f'_final_pdf.{saveType}')
 plt.close(fig_pdf_final)
 
 
@@ -1395,7 +1395,7 @@ fig_pair = sns.pairplot(
     palette={'True': 'steelblue', 'Predicted': 'tomato'},
 )
 fig_pair.figure.suptitle(
-    f'{modelString} Final-State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
+    f'{modelString} Final State Pairplot — True vs Predicted',
     y=1.01,
 )
 fig_pair.savefig(_pfx + f'_final_state_pairplot.{saveType}', bbox_inches='tight')
