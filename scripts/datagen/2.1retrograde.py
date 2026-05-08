@@ -11,7 +11,6 @@ parser.add_argument('--plot', action='store_true', help='Whether to plot the res
 parser.add_argument('--obs', type=float, default=2, help='The time delta (in hours) between observations.')
 parser.add_argument('--n', type=int, default=10000, help='The number of systems to generate.')
 parser.add_argument('--no-save', action='store_true', help='Whether to not save the results.')
-parser.add_argument('--no-numba', action='store_true', help='Whether to not use numba.')
 args = parser.parse_args()
 
 try:
@@ -239,7 +238,7 @@ print("Shape of n_traj:", np.array(n_traj).shape)
 save_dir = "./data/cr3bp/"
 # ensure the save directory exists
 os.makedirs(save_dir, exist_ok=True)
-save_file = f"2.1_retrograde_geo_to_moon_obs-dt_{args.obs}_n_{args.n}_ND.npz"
+save_file = f"2.1_retrograde_geo_to_moon_obs-dt_{args.obs}_n_{args.n}_ND.npy"
 
 save_path = os.path.join(save_dir, save_file)
 

@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# run dataset generation for the Duffing system if files do not exist
+if [ ! -f "2.1_retrograde_geo_to_moon_obs-dt_2_n_10000_ND.npy" ]; then
+    echo "Generating dataset for the CR3BP 2.1 retrograde orbit..."
+    python scripts/datagen/2.1retrograde.py
+    echo "Dataset generation complete."
+else
+    echo "Dataset already exists. Skipping generation."
+fi
+
 if [ "$1" == "pdf" ]; then
     echo "PDF flag is set. Passing --pdf to scripts."
     pdf_flag="--pdf"
