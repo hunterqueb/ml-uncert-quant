@@ -1332,6 +1332,38 @@ if saveType != "pdf":  # skip animation for PDF output to save time
         anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
     plt.close(fig_pdf)
 
+# ==============================
+# Export ML trajectory results
+# ==============================
+
+import os
+
+_results_dir = "./data/results"
+os.makedirs(_results_dir, exist_ok=True)
+
+_results_file = os.path.join(
+    _results_dir,
+    f"2bp_{modelString}_orbit_{args.orbit}_prop{args.propMin}min"
+    f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npy"
+)
+
+np.savez_compressed(
+    _results_file,
+    true_reach=true_reach,         # (T, N_trajs, D) full reachability tube — true
+    pred_reach=pred_reach,         # (T, N_trajs, D) full reachability tube — predicted
+    final_true=final_true,         # (N_trajs, D) final-state true
+    final_pred=final_pred,         # (N_trajs, D) final-state predicted
+    train_timesteps=np.array(train_timesteps),
+    kl_pos=np.array(kl_pos_values),
+    kl_vel=np.array(kl_vel_values),
+    kl_6d=np.array(kl_6d_values),
+    model=np.array(modelString),
+    orbit=np.array(args.orbit),
+    prop_min=np.array(args.propMin),
+    dimensional=np.array(not args.dim),
+)
+print(f"Results saved to {_results_file}")
+
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import cross_val_score
 
@@ -1343,11 +1375,11 @@ def classifier_test_6d(p_samples, q_samples):
     """
     X = np.vstack([p_samples, q_samples])
     y = np.array([0]*len(p_samples) + [1]*len(q_samples))
-    
+
     clf = GradientBoostingClassifier(n_estimators=100)
     auc = cross_val_score(clf, X, y, cv=5, scoring='roc_auc').mean()
     clf.fit(X, y)
-    
+
     return auc, clf.feature_importances_
 
 print('Testing KL divergence...')
