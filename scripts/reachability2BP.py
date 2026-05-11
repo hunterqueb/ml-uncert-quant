@@ -1344,7 +1344,7 @@ os.makedirs(_results_dir, exist_ok=True)
 _results_file = os.path.join(
     _results_dir,
     f"2bp_{modelString}_orbit_{args.orbit}_prop{args.propMin}min"
-    f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npy"
+    f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npz"
 )
 
 np.savez_compressed(

@@ -1339,7 +1339,7 @@ os.makedirs(_results_dir, exist_ok=True)
 _results_file = os.path.join(
     _results_dir,
     f"3bp_{modelString}_orbit_{orbit}_trainRatio_{args.train_ratio}"
-    f"_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npy"
+    f"_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npz"
 )
 
 np.savez_compressed(
