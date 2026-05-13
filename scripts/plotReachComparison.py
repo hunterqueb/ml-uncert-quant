@@ -72,6 +72,15 @@ _pfx = os.path.join(args.out_dir, 'comparison_' + mamba_stem.replace('_mamba', '
 # Style
 # ──────────────────────────────────────────────────────────
 sns.set_theme(style='whitegrid', palette='muted')
+plt.rcParams.update({
+    'font.size':        16,
+    'axes.titlesize':   18,
+    'axes.labelsize':   16,
+    'xtick.labelsize':  14,
+    'ytick.labelsize':  14,
+    'legend.fontsize':  14,
+    'figure.titlesize': 18,
+})
 _palette = {'True': 'steelblue', 'Mamba': 'tomato', 'LSTM': 'seagreen'}
 
 # ──────────────────────────────────────────────────────────
@@ -87,7 +96,19 @@ kl_m = _load_kl_full(mamba_d)
 kl_l = _load_kl_full(lstm_d)
 
 n_frames = min(len(kl_m), len(kl_l))
-t_axis   = np.arange(n_frames)
+
+if D == 4: # 4d == cr3bp
+    # 2 hr observations
+    obs_time = 2
+    final_time = n_frames * obs_time 
+    time_label = 'Time (hours)'
+if D == 6: #6d == 2bp
+    # 1 minute observations
+    obs_time = 1
+    final_time = n_frames * obs_time
+    time_label = 'Time (minutes)'
+
+t_axis   = np.arange(0, final_time, obs_time)
 
 fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
 ax_kl.plot(t_axis, kl_m[:n_frames], color='tomato',   linewidth=1.5,
@@ -95,7 +116,7 @@ ax_kl.plot(t_axis, kl_m[:n_frames], color='tomato',   linewidth=1.5,
 ax_kl.plot(t_axis, kl_l[:n_frames], color='seagreen', linewidth=1.5,
            label=f'LSTM  (final = {kl_l[n_frames - 1]:.4f})')
 ax_kl.axvline(x=train_ts, color='gray', linestyle='--', linewidth=1, label='Train/Test boundary')
-ax_kl.set_xlabel('Time step')
+ax_kl.set_xlabel(time_label)
 ax_kl.set_ylabel(f'KL Divergence  D(true ‖ pred)  [{D}D]')
 ax_kl.set_title(f'{D}D Full-State KL Divergence Over Time: Mamba vs LSTM')
 ax_kl.legend()
