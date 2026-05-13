@@ -17,6 +17,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 import seaborn as sns
 
 parser = argparse.ArgumentParser(description='Compare Mamba and LSTM reachability results')
@@ -173,6 +174,14 @@ g = sns.pairplot(
     palette={'True': 'steelblue', 'Mamba': 'tomato', 'LSTM': 'seagreen'},
 )
 g.figure.suptitle('Final State Pairplot: True vs Mamba vs LSTM', y=1.01)
+_legend_handles = [
+    mlines.Line2D([], [], marker='o', color='w', markerfacecolor='steelblue', markersize=10, label='True'),
+    mlines.Line2D([], [], marker='o', color='w', markerfacecolor='tomato',    markersize=10, label='Mamba'),
+    mlines.Line2D([], [], marker='o', color='w', markerfacecolor='seagreen',  markersize=10, label='LSTM'),
+]
+g.legend.remove()
+g.figure.legend(handles=_legend_handles, title='Model', loc='upper right',
+                frameon=True, fontsize=14, title_fontsize=14)
 g.savefig(_pfx + f'_pairplot.{save_ext}', bbox_inches='tight')
 plt.close(g.figure)
 print(f"Saved: {_pfx}_pairplot.{save_ext}")
