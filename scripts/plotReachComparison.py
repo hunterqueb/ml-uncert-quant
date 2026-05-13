@@ -3,7 +3,7 @@ Compare Mamba vs LSTM reachability results from data/results/*.npz files.
 
 Generates three plots:
   1. Full-state KL divergence over time (both models on one axes)
-  2. Marginal CDF of final-state distance from centroid (pos + vel)
+  2. Marginal CDF of final-state distance from centroid (full state)
   3. Pairplot of final-state distributions (True / Mamba / LSTM)
 
 Usage:
@@ -109,37 +109,24 @@ print(f"Saved: {_pfx}_kl_full.{save_ext}")
 # ──────────────────────────────────────────────────────────
 final_true = final_true_m  # reference distribution (same dataset split)
 
-centroid_pos = final_true[:, :n_pos].mean(axis=0)
-centroid_vel = final_true[:, n_pos:].mean(axis=0)
+centroid = final_true.mean(axis=0)
 
-dist_true_pos  = np.linalg.norm(final_true[:,   :n_pos] - centroid_pos, axis=1)
-dist_mamba_pos = np.linalg.norm(final_pred_m[:,  :n_pos] - centroid_pos, axis=1)
-dist_lstm_pos  = np.linalg.norm(final_pred_l[:,  :n_pos] - centroid_pos, axis=1)
+dist_true  = np.linalg.norm(final_true   - centroid, axis=1)
+dist_mamba = np.linalg.norm(final_pred_m - centroid, axis=1)
+dist_lstm  = np.linalg.norm(final_pred_l - centroid, axis=1)
 
-dist_true_vel  = np.linalg.norm(final_true[:,   n_pos:] - centroid_vel, axis=1)
-dist_mamba_vel = np.linalg.norm(final_pred_m[:,  n_pos:] - centroid_vel, axis=1)
-dist_lstm_vel  = np.linalg.norm(final_pred_l[:,  n_pos:] - centroid_vel, axis=1)
+_df_cdf = pd.DataFrame({
+    'Distance from centroid': np.concatenate([dist_true, dist_mamba, dist_lstm]),
+    'Distribution': (['True']  * len(dist_true) +
+                     ['Mamba'] * len(dist_mamba) +
+                     ['LSTM']  * len(dist_lstm)),
+})
 
-fig_cdf, (ax_pos_cdf, ax_vel_cdf) = plt.subplots(1, 2, figsize=(14, 6))
-for ax, dt, dm, dl, xlabel, title in [
-    (ax_pos_cdf,
-     dist_true_pos, dist_mamba_pos, dist_lstm_pos,
-     'Distance from centroid (km)', 'Position Marginal CDF'),
-    (ax_vel_cdf,
-     dist_true_vel, dist_mamba_vel, dist_lstm_vel,
-     'Distance from centroid (km/s)', 'Velocity Marginal CDF'),
-]:
-    _df = pd.DataFrame({
-        xlabel:         np.concatenate([dt, dm, dl]),
-        'Distribution': (['True']  * len(dt) +
-                         ['Mamba'] * len(dm) +
-                         ['LSTM']  * len(dl)),
-    })
-    sns.ecdfplot(data=_df, x=xlabel, hue='Distribution', ax=ax, palette=_palette)
-    ax.set_ylabel('Cumulative Probability')
-    ax.set_title(title)
-
-fig_cdf.suptitle('Marginal CDF — Final State: Mamba vs LSTM vs True')
+fig_cdf, ax_cdf = plt.subplots(figsize=(8, 5))
+sns.ecdfplot(data=_df_cdf, x='Distance from centroid', hue='Distribution',
+             ax=ax_cdf, palette=_palette)
+ax_cdf.set_ylabel('Cumulative Probability')
+ax_cdf.set_title('Marginal CDF — Final State: Mamba vs LSTM vs True')
 plt.tight_layout()
 plt.savefig(_pfx + f'_marginal_cdf.{save_ext}')
 plt.close(fig_cdf)
