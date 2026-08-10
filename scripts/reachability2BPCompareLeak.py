@@ -12,6 +12,7 @@ from scipy.spatial.qhull import QhullError # import here for p36 compatibility
 from scipy.stats import gaussian_kde
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torch import nn
+from sklearn.neighbors import NearestNeighbors
 
 
 from qutils.ml.utils import printModelParmSize, getDevice, Adam_mini
@@ -27,7 +28,7 @@ from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSupe
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
-parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the model')
+parser.add_argument('--lookback', type=int, default=16, help='Number of past steps fed to the model')
 parser.add_argument('--train-timesteps', type=int, default=10, help='Number of time steps from each edge used as training time region')
 parser.add_argument('--traj-index', type=int, default=124, help='Trajectory index to plot')
 parser.add_argument('--train-ratio', type=float, default=0.8, help='Ratio of trajectories to use for training (rest used for testing)')
@@ -99,7 +100,58 @@ class SimpleLSTMRegressor(nn.Module):
         y = self.head(h_last)       # (B, output_size)
         return y
 
+def kl_knn_6d(p_samples, q_samples, k=15,eps=1e-8):
+    """
+    k-NN estimator for KL divergence D(P||Q) in arbitrary dimensions.
+    Wang, Kulkarni, Verdú (2009).
+    https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
 
+    p_samples: (n, d)
+    q_samples: (m, d)
+    Returns scalar KL estimate.
+    """
+    n, d = p_samples.shape
+    m = q_samples.shape[0]
+
+    # k-NN distances within P
+    nn_p = NearestNeighbors(n_neighbors=k+1).fit(p_samples)
+    rk, _ = nn_p.kneighbors(p_samples)
+    rk = rk[:, k]  # k-th neighbor distance (exclude self)
+
+    # k-NN distances from P to Q
+    nn_q = NearestNeighbors(n_neighbors=k).fit(q_samples)
+    sk, _ = nn_q.kneighbors(p_samples)
+    sk = sk[:, k-1]  # k-th neighbor distance
+    sk = np.maximum(sk, eps)          # floor Q-distances
+    rk = np.maximum(rk, eps)          # floor P-distances too — see below
+    # Wang et al. estimator
+    kl = (d / n) * np.sum(np.log(sk / rk)) + np.log(m / (n - 1))
+    return float(kl)
+
+
+def _kl_split(true_cloud, pred_cloud, k=10, n_splits=20, seed=0):
+    """D(true||pred) via disjoint index sets: P from A, Q from B, A∩B=∅.
+       No predicted point is the index-partner of a true point -> sk non-degenerate."""
+    rng = np.random.default_rng(seed)
+    n = true_cloud.shape[0]; vals = []
+    for _ in range(n_splits):
+        idx = rng.permutation(n); half = n // 2
+        A, B = idx[:half], idx[half:]
+        vals.append(kl_knn_6d(true_cloud[A], pred_cloud[B], k=k))  # keep eps floor; it won't bind now
+    v = np.array(vals)
+    return v.mean(), v.std(), np.percentile(v, [2.5, 97.5])
+
+def _kl_split_delta(true_cloud, pred_a, pred_b, k=10, n_splits=20, seed=0):
+    """Paired delta KL(true||a) - KL(true||b): SAME A,B each split (common-mode cancels),
+       B disjoint from A (no self-pairing). Best of both."""
+    rng = np.random.default_rng(seed)
+    n = true_cloud.shape[0]; d = np.empty(n_splits)
+    for i in range(n_splits):
+        idx = rng.permutation(n); half = n // 2
+        A, B = idx[:half], idx[half:]
+        P = true_cloud[A]
+        d[i] = kl_knn_6d(P, pred_a[B], k=k) - kl_knn_6d(P, pred_b[B], k=k)
+    return d.mean(), d.std(), np.percentile(d, [2.5, 97.5])
 # hyperparameters
 n_epochs = args.n_epochs
 lr = args.lr
@@ -446,139 +498,233 @@ elif modelString.startswith('lstm'):
     trainLSTM()
 
 
-def mambaEval():
+def mambaEval(lstm_pred_cloud=None, kl_k=10, kl_B=200, kl_frac=0.8):
+    """
+    lstm_pred_cloud: optional (num_test_trajs, D) array = LSTM's final predicted
+                     reachable cloud, so KL is compared apples-to-apples.
+    Returns (..., leak_report, kl_report).
+    """
     def build_full_seq(x_all, y_all, traj_idx):
-        x_np = x_all.numpy()
-        y_np = y_all.numpy()
+        x_np = x_all.numpy(); y_np = y_all.numpy()
         if x_np.ndim == 4:
             init = x_np[0, :, traj_idx, :]
         else:
             init = x_np[0, traj_idx, :][np.newaxis, :]
-        y_seq = y_np[:, traj_idx, :]
-        print("init shape:", init.shape)
-        print("y_seq shape:", y_seq.shape)
-        return np.concatenate([init, y_seq], axis=0)
+        return np.concatenate([init, y_np[:, traj_idx, :]], axis=0)
+
+    # ---- KL helpers (direction: D(true || pred) = info lost reconstructing the
+    #      true reachable density with the prediction). Reverse reported too. ----
+    def _kl_pair(true_cloud, pred_cloud, k):
+        return (kl_knn_6d(true_cloud, pred_cloud, k=k),   # D(true||pred)  <- primary
+                kl_knn_6d(pred_cloud, true_cloud, k=k))   # D(pred||true)  <- reference
+
+    def _kl_ci(true_cloud, pred_cloud, k, B, frac, seed=0):
+        # subsample WITHOUT replacement on the P(true) side -> no duplicate points,
+        # so the kNN estimator stays finite (bootstrap-with-replacement breaks it).
+        rng = np.random.default_rng(seed)
+        n = true_cloud.shape[0]; s = max(k + 2, int(frac * n))
+        v = np.array([kl_knn_6d(true_cloud[rng.choice(n, s, replace=False)],
+                                pred_cloud, k=k) for _ in range(B)])
+        return v.mean(), v.std(), np.percentile(v, [2.5, 97.5])
+
+    def _kl_delta_ci(true_cloud, pred_a, pred_b, k, B, frac, seed=0):
+        # paired delta a-b: same true-subsample each iter, so the two KLs share
+        # their dominant noise term and the difference is far tighter than either CI.
+        rng = np.random.default_rng(seed)
+        n = true_cloud.shape[0]; s = max(k + 2, int(frac * n))
+        d = np.empty(B)
+        for i in range(B):
+            P = true_cloud[rng.choice(n, s, replace=False)]
+            d[i] = kl_knn_6d(P, pred_a, k=k) - kl_knn_6d(P, pred_b, k=k)
+        return d.mean(), d.std(), np.percentile(d, [2.5, 97.5])
 
     with torch.no_grad():
         traj_idx = traj_index
-        def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
+
+        def predict_last_step(x_all, batch_size=args.batch_test,
+                              slice_traj_idx=None, traj_chunk=None):
+            if traj_chunk is None:
+                traj_chunk = args.traj_chunk
             loader_eval = data.DataLoader(
-                data.TensorDataset(x_all),
-                shuffle=False,
-                batch_size=batch_size,
-            )
-            traj_chunk = args.traj_chunk
+                data.TensorDataset(x_all), shuffle=False, batch_size=batch_size)
             preds = []
             for (xb_eval,) in loader_eval:
                 b, L, T, D_sz = xb_eval.shape
                 pred_chunks = []
                 for t0 in range(0, T, traj_chunk):
                     t1 = min(t0 + traj_chunk, T)
-                    xb_c = xb_eval[:, :, t0:t1, :].to(device)  # (b, L, tc, D)
-                    tc = t1 - t0 
+                    xb_c = xb_eval[:, :, t0:t1, :].to(device)
+                    tc = t1 - t0
                     xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
-                    pred_c = model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz)
-                    pred_chunks.append(pred_c)
-                pred = torch.cat(pred_chunks, dim=1)  # (b, T, D)
+                    pred_chunks.append(model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz))
+                pred = torch.cat(pred_chunks, dim=1)
                 if slice_traj_idx is not None:
-                    pred = pred[:, slice_traj_idx, :]  # (batch, D)
+                    pred = pred[:, slice_traj_idx, :]
                 preds.append(pred)
-            return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
+            return torch.cat(preds, dim=0)
 
-        test_pred_full = predict_last_step(test_in)
+        # ------------------- leak check (as before) -------------------
+        def check_eval_leak(x_all, target_local_idx=0, tol=1e-6):
+            T_test = x_all.shape[2]
+            n_train = int(numericResult.shape[1] * args.train_ratio)
+            assert T_test == numericResult.shape[1] - n_train, \
+                "test_in contains train trajectories -> train/test leak"
+            print(f"[leak] provenance OK: {T_test} test-only trajectories on scan axis.")
+            pred_iso = predict_last_step(x_all, traj_chunk=1)
+            pred_cfg = predict_last_step(x_all, traj_chunk=args.traj_chunk)
+            delta = (pred_cfg - pred_iso).abs()
+            print(f"[leak] chunk-invariance (chunk={args.traj_chunk} vs 1): "
+                  f"max|Δ|={delta.max():.3e} mean|Δ|={delta.mean():.3e}")
+            leaked = delta.max().item() > tol
+            print(f"[leak] VERDICT: cross-trajectory leak "
+                  f"{'DETECTED' if leaked else 'NOT detected'}.")
+            return {"leaked": leaked, "pred_isolated": pred_iso, "pred_chunked": pred_cfg}
 
+        leak_report = check_eval_leak(test_in, target_local_idx=traj_idx)
+
+        # ------------------- KL on the final reachable clouds -------------------
+        true_cloud = test_out[-1].numpy()
+        cloud_iso  = leak_report["pred_isolated"][-1].numpy()
+        cloud_cfg  = leak_report["pred_chunked"][-1].numpy()
+
+        iso_m, iso_sd, iso_ci = _kl_split(true_cloud, cloud_iso, k=kl_k)
+        cfg_m, cfg_sd, cfg_ci = _kl_split(true_cloud, cloud_cfg, k=kl_k)
+        dlk_m, dlk_sd, dlk_ci = _kl_split_delta(true_cloud, cloud_iso, cloud_cfg, k=kl_k)
+
+        print(f"[kl] leak-free : {iso_m:.4f} 95%CI {iso_ci[0]:.4f}..{iso_ci[1]:.4f}")
+        print(f"[kl] leaked    : {cfg_m:.4f} 95%CI {cfg_ci[0]:.4f}..{cfg_ci[1]:.4f}")
+        assert iso_m >= -0.02 and cfg_m >= -0.02, "still negative -> estimator still degenerate, do NOT trust"
+        sig = not (dlk_ci[0] <= 0 <= dlk_ci[1])
+        print(f"[kl] leak delta (iso-cfg): {dlk_m:+.4f} 95%CI {dlk_ci[0]:+.4f}..{dlk_ci[1]:+.4f} "
+              f"-> {'SIGNIFICANT' if sig else 'noise'}")
+
+        if lstm_pred_cloud is not None:
+            lstm_cloud = np.asarray(lstm_pred_cloud)
+            lst_m, lst_sd, lst_ci = _kl_split(true_cloud, lstm_cloud, k=kl_k)
+            gd_m, gd_sd, gd_ci = _kl_split_delta(true_cloud, lstm_cloud, cloud_iso, k=kl_k)  # lstm - iso
+            print(f"[kl] LSTM      : {lst_m:.4f} 95%CI {lst_ci[0]:.4f}..{lst_ci[1]:.4f}")
+            print(f"[kl] gap LSTM - Mamba(leak-free): {gd_m:+.4f} 95%CI {gd_ci[0]:+.4f}..{gd_ci[1]:+.4f} "
+                  f"-> {'Mamba wins, leak-free' if (gd_m>0 and gd_ci[0]>0) else 'NOT significant'}")
+
+        # ------------------- original outputs (unchanged) -------------------
+        test_pred_full = leak_report["pred_chunked"]     # == predict_last_step(test_in)
         traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
-        train_traj_prefix = numericResult[:train_timesteps, traj_split_idx + traj_idx, :]  # (train_timesteps, D)
+        train_traj_prefix = numericResult[:train_timesteps, traj_split_idx + traj_idx, :]
         true_test_seq = np.concatenate(
-            [train_traj_prefix, build_full_seq(test_in, test_out, traj_idx)], axis=0
-        )  # (800, D)
+            [train_traj_prefix, build_full_seq(test_in, test_out, traj_idx)], axis=0)
         pred_test_seq = np.concatenate(
-            [train_traj_prefix, build_full_seq(test_in, test_pred_full, traj_idx)], axis=0
-        )  # (800, D)
-
+            [train_traj_prefix, build_full_seq(test_in, test_pred_full, traj_idx)], axis=0)
         final_true = test_out[-1].numpy()
         final_pred = test_pred_full[-1].numpy()
 
-        return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
+        return (true_test_seq, pred_test_seq, final_true, final_pred,
+                test_pred_full, leak_report)
     
-def lstmEval():
+def lstmEval(mamba_iso_cloud=None, true_cloud_ref=None, kl_k=10):
+    """
+    mamba_iso_cloud : (N_test, D) leak-free Mamba final cloud = leak_report["pred_isolated"][-1],
+                      in the SAME (normalized) space as true_cloud_ref. Pass it to get the gap.
+    true_cloud_ref  : (N_test, D) the SAME true final cloud used in mambaEval (test_out[-1]),
+                      normalized. If None, falls back to this path's own true_last (see assert).
+    """
     with torch.no_grad():
-        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-        xb, yb = next(iter(test_loader))
-        xb = xb.to(device)
-        yb = yb.to(device)
-        pred = model(xb).cpu().numpy()
-        yb = yb.cpu().numpy()
         def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
             loader_eval = data.DataLoader(
-                data.TensorDataset(x_all),
-                shuffle=False,
-                batch_size=batch_size,
-            )
+                data.TensorDataset(x_all), shuffle=False, batch_size=batch_size)
             preds = []
             for (xb_eval,) in loader_eval:
                 xb_eval = xb_eval.to(device)
-                pred = model(xb_eval).cpu()  # (batch, D)
+                pred = model(xb_eval).cpu()
                 if slice_traj_idx is not None:
-                    pred = pred[:, slice_traj_idx]  # (batch,)
+                    pred = pred[:, slice_traj_idx]
                 preds.append(pred)
-            return torch.cat(preds, dim=0)  # (num_windows, D)
+            return torch.cat(preds, dim=0)
 
-        test_pred_full = predict_last_step(test_in)
-
-        # De-normalize helper
-        mu = norm["mu"]
-        sig = norm["sig"]
-
+        mu = norm["mu"]; sig = norm["sig"]
         def denorm(x):
-            # x: torch or np
             if isinstance(x, np.ndarray):
                 return x * sig.numpy() + mu.numpy()
             return x * sig + mu
 
-        # Extract last window slice (time = final available) across ALL test trajectories
-        Wte = meta["W_test"]
-        Nts = meta["N_test"]
-        start = (Wte - 1) * Nts
-        end = Wte * Nts
+        Wte = meta["W_test"]; Nts = meta["N_test"]
+        start = (Wte - 1) * Nts; end = Wte * Nts
 
         model.eval()
-        with torch.no_grad():
-            xb_last = test_in[start:end].to(device)
-            pred_last = model(xb_last).cpu()
-            true_last = test_out[start:end].cpu()
+        # final-time slice across ALL test trajectories, kept in NORMALIZED space for KL
+        xb_last   = test_in[start:end].to(device)
+        pred_last = model(xb_last).cpu()          # (N_test, D)  normalized
+        true_last = test_out[start:end].cpu()     # (N_test, D)  normalized
+
+        # ================= KL analysis (leak-free by construction) =================
+        # The LSTM has no trajectory scan axis -> no eval leak -> this IS the clean number.
+        lstm_cloud = pred_last.numpy()            # normalized, ordered by test trajectory
+        true_cloud = (true_cloud_ref if true_cloud_ref is not None
+                      else true_last.numpy())
+
+        assert lstm_cloud.shape == true_cloud.shape, \
+            f"cloud shape mismatch {lstm_cloud.shape} vs {true_cloud.shape} -> ordering/space mismatch"
+        if true_cloud_ref is not None:
+            # sanity: same true cloud both paths. If this fails, you're comparing
+            # against two different 'truths' and any gap is an artifact.
+            assert np.allclose(np.sort(true_cloud_ref.ravel()),
+                               np.sort(true_last.numpy().ravel()), atol=1e-4), \
+                "true_cloud_ref differs from this path's true_last -> not the same test set/space"
+
+        lstm_m, lstm_sd, lstm_ci = _kl_split(true_cloud, lstm_cloud, k=kl_k)
+        print(f"[kl] LSTM (leak-free by design): {lstm_m:.4f} "
+              f"95%CI {lstm_ci[0]:.4f}..{lstm_ci[1]:.4f}")
+        assert lstm_m >= -0.02, "negative KL -> estimator degenerate (dup ICs / space mismatch); do NOT trust"
+
+        kl_report = {"kl_lstm": lstm_m, "kl_lstm_ci": lstm_ci, "kl_lstm_sd": lstm_sd}
+
+        if mamba_iso_cloud is not None:
+            mamba_iso = np.asarray(mamba_iso_cloud)
+            assert mamba_iso.shape == true_cloud.shape, \
+                "mamba_iso_cloud shape mismatch -> different test set or space"
+            # THE result: gap = KL(true||LSTM) - KL(true||Mamba_leakfree), paired over splits.
+            gd_m, gd_sd, gd_ci = _kl_split_delta(true_cloud, lstm_cloud, mamba_iso, k=kl_k)
+            mamba_m, _, mamba_ci = _kl_split(true_cloud, mamba_iso, k=kl_k)
+            print(f"[kl] Mamba (leak-free)         : {mamba_m:.4f} "
+                  f"95%CI {mamba_ci[0]:.4f}..{mamba_ci[1]:.4f}")
+            print(f"[kl] gap LSTM - Mamba(leak-free): {gd_m:+.4f} "
+                  f"95%CI {gd_ci[0]:+.4f}..{gd_ci[1]:+.4f}  -> " +
+                  ("Mamba wins leak-free" if gd_m > 0 and gd_ci[0] > 0 else
+                   "LSTM wins/ties leak-free -> original result was the leak"
+                   if gd_m < 0 or gd_ci[0] <= 0 <= gd_ci[1] else "inconclusive"))
+            kl_report.update({"kl_mamba_iso": mamba_m, "kl_mamba_iso_ci": mamba_ci,
+                              "gap_lstm_minus_mamba": gd_m, "gap_ci": gd_ci,
+                              "mamba_wins_leakfree": bool(gd_m > 0 and gd_ci[0] > 0)})
+
+        # ================= original outputs (de-normed, for plotting) =================
+        test_pred_full_norm = predict_last_step(test_in)
 
         def build_full_seq(x_all, y_all, traj_idx):
             n_test = meta["N_test"]
             if traj_idx < 0 or traj_idx >= n_test:
                 raise IndexError(f"traj_idx out of range: {traj_idx}, expected [0, {n_test-1}]")
-            # Flattened layout is (window0 traj0..trajN-1, window1 traj0..trajN-1, ...)
-            x_init = x_all[traj_idx, :, :].cpu()        # (lookback, D)
-            y_seq = y_all[traj_idx::n_test, :].cpu()    # (num_windows, D)
+            x_init = x_all[traj_idx, :, :].cpu()
+            y_seq  = y_all[traj_idx::n_test, :].cpu()
             full_seq = torch.cat([x_init, y_seq], dim=0)
             return denorm(full_seq).numpy()
 
-        train_traj_prefix = numericResult[:train_timesteps, traj_index, :]  # (train_timesteps, D)
+        train_traj_prefix = numericResult[:train_timesteps, traj_index, :]
         true_test_seq = np.concatenate(
-            [train_traj_prefix, build_full_seq(test_in, test_out, traj_index)], axis=0
-        )  # (800, D)
+            [train_traj_prefix, build_full_seq(test_in, test_out, traj_index)], axis=0)
         pred_test_seq = np.concatenate(
-            [train_traj_prefix, build_full_seq(test_in, test_pred_full, traj_index)], axis=0
-        )  # (800, D)
+            [train_traj_prefix, build_full_seq(test_in, test_pred_full_norm, traj_index)], axis=0)
 
         final_true = denorm(true_last).numpy()
         final_pred = denorm(pred_last).numpy()
+        test_pred_full = denorm(test_pred_full_norm)
 
-        test_pred_full = denorm(predict_last_step(test_in))
-
-        return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
-
+        return (true_test_seq, pred_test_seq, final_true, final_pred,
+                test_pred_full, kl_report)
 # generate predictions
 model.eval()
 if modelString.startswith('mamba'):
-    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = mambaEval()
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full, _, _= mambaEval()
 elif modelString.startswith('lstm'):
-    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full, _ = lstmEval()
 
 
 
@@ -1095,36 +1241,32 @@ kl_pos_values = []
 kl_vel_values = []
 kl_6d_values = []
 
-def kl_hist_nd(p_samples, q_samples, bins=None, eps=1e-12):
-    """
-    Histogram-based estimator for the discrete KL divergence D(P||Q).
 
-    Bins both sample sets onto a shared grid spanning their combined range,
-    normalizes bin counts into probability mass functions, and computes the
-    discrete KL divergence sum(p * log(p / q)). Laplace smoothing (eps) keeps
-    empty bins from producing -inf/nan.
+def kl_knn_6d(p_samples, q_samples, k=10):
+    """
+    k-NN estimator for KL divergence D(P||Q) in arbitrary dimensions.
+    Wang, Kulkarni, Verdú (2009).
+    https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
 
     p_samples: (n, d)
     q_samples: (m, d)
-    bins: bins per dimension; if None, chosen automatically so the total
-          number of grid cells stays modest relative to the sample count.
     Returns scalar KL estimate.
     """
     n, d = p_samples.shape
     m = q_samples.shape[0]
-    if bins is None:
-        bins = max(2, int(round((min(n, m) / 5) ** (1.0 / d))))
 
-    combined = np.vstack([p_samples, q_samples])
-    edges = [np.linspace(combined[:, i].min(), combined[:, i].max(), bins + 1) for i in range(d)]
+    # k-NN distances within P
+    nn_p = NearestNeighbors(n_neighbors=k+1).fit(p_samples)
+    rk, _ = nn_p.kneighbors(p_samples)
+    rk = rk[:, k]  # k-th neighbor distance (exclude self)
 
-    p_hist, _ = np.histogramdd(p_samples, bins=edges)
-    q_hist, _ = np.histogramdd(q_samples, bins=edges)
+    # k-NN distances from P to Q
+    nn_q = NearestNeighbors(n_neighbors=k).fit(q_samples)
+    sk, _ = nn_q.kneighbors(p_samples)
+    sk = sk[:, k-1]  # k-th neighbor distance
 
-    p_pmf = (p_hist + eps) / (p_hist.sum() + eps * p_hist.size)
-    q_pmf = (q_hist + eps) / (q_hist.sum() + eps * q_hist.size)
-
-    kl = np.sum(p_pmf * np.log(p_pmf / q_pmf))
+    # Wang et al. estimator
+    kl = (d / n) * np.sum(np.log(sk / rk)) + np.log(m / (n - 1))
     return float(kl)
 
 print("Computing KL divergence over time (this may take a moment)...")
@@ -1132,11 +1274,11 @@ print("Computing KL divergence over time (this may take a moment)...")
 for fi in range(n_frames):
     p = true_reach[fi, :, :]   # (n, 6)
     q = pred_reach[fi, :, :]   # (n, 6)
-
-    kl_6d = kl_hist_nd(p, q)
-
-    kl_pos = kl_hist_nd(p[:, :3], q[:, :3])
-    kl_vel = kl_hist_nd(p[:, 3:], q[:, 3:])
+    
+    kl_6d = kl_knn_6d(p, q, k=10)
+    
+    kl_pos = kl_knn_6d(p[:, :3], q[:, :3], k=10)
+    kl_vel = kl_knn_6d(p[:, 3:], q[:, 3:], k=10)
 
     kl_6d_values.append(kl_6d)
     kl_pos_values.append(kl_pos)
