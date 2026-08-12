@@ -1099,33 +1099,36 @@ kl_pos_values = []
 kl_vel_values = []
 kl_6d_values = []
 
-from sklearn.neighbors import NearestNeighbors
-
-def kl_knn_6d(p_samples, q_samples, k=5):
+def kl_hist_nd(p_samples, q_samples, bins=None, eps=1e-12):
     """
-    k-NN estimator for KL divergence D(P||Q) in arbitrary dimensions.
-    Wang, Kulkarni, Verdú (2009).
-    https://www.princeton.edu/~kulkarni/Papers/Journals/j068_2009_WangKulVer_TransIT.pdf
+    Histogram-based estimator for the discrete KL divergence D(P||Q).
+
+    Bins both sample sets onto a shared grid spanning their combined range,
+    normalizes bin counts into probability mass functions, and computes the
+    discrete KL divergence sum(p * log(p / q)). Laplace smoothing (eps) keeps
+    empty bins from producing -inf/nan.
 
     p_samples: (n, d)
     q_samples: (m, d)
+    bins: bins per dimension; if None, chosen automatically so the total
+          number of grid cells stays modest relative to the sample count.
     Returns scalar KL estimate.
     """
     n, d = p_samples.shape
     m = q_samples.shape[0]
+    if bins is None:
+        bins = max(2, int(round((min(n, m) / 5) ** (1.0 / d))))
 
-    # k-NN distances within P
-    nn_p = NearestNeighbors(n_neighbors=k+1).fit(p_samples)
-    rk, _ = nn_p.kneighbors(p_samples)
-    rk = rk[:, k]  # k-th neighbor distance (exclude self)
+    combined = np.vstack([p_samples, q_samples])
+    edges = [np.linspace(combined[:, i].min(), combined[:, i].max(), bins + 1) for i in range(d)]
 
-    # k-NN distances from P to Q
-    nn_q = NearestNeighbors(n_neighbors=k).fit(q_samples)
-    sk, _ = nn_q.kneighbors(p_samples)
-    sk = sk[:, k-1]  # k-th neighbor distance
+    p_hist, _ = np.histogramdd(p_samples, bins=edges)
+    q_hist, _ = np.histogramdd(q_samples, bins=edges)
 
-    # Wang et al. estimator
-    kl = (d / n) * np.sum(np.log(sk / rk)) + np.log(m / (n - 1))
+    p_pmf = (p_hist + eps) / (p_hist.sum() + eps * p_hist.size)
+    q_pmf = (q_hist + eps) / (q_hist.sum() + eps * q_hist.size)
+
+    kl = np.sum(p_pmf * np.log(p_pmf / q_pmf))
     return float(kl)
 
 print("Computing KL divergence over time (this may take a moment)...")
@@ -1133,11 +1136,11 @@ print("Computing KL divergence over time (this may take a moment)...")
 for fi in range(n_frames):
     p = true_reach[fi, :, :]   # (n, 6)
     q = pred_reach[fi, :, :]   # (n, 6)
-    
-    kl_6d = kl_knn_6d(p, q, k=5)
 
-    kl_pos = kl_knn_6d(p[:, :2], q[:, :2], k=5)
-    kl_vel = kl_knn_6d(p[:, 2:], q[:, 2:], k=5)
+    kl_6d = kl_hist_nd(p, q)
+
+    kl_pos = kl_hist_nd(p[:, :3], q[:, :3])
+    kl_vel = kl_hist_nd(p[:, 3:], q[:, 3:])
 
     kl_6d_values.append(kl_6d)
     kl_pos_values.append(kl_pos)
