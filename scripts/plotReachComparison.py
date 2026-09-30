@@ -17,9 +17,14 @@ Usage:
       --lstm  data/results/3bp_lstm_orbit_2.1_retrograde_geo_to_moon_trainRatio_0.8_epoch_10_lr_0.01_train_timesteps_80.npz
 """
 import argparse
+import glob
 import os
 
 import numpy as np
+import yaml
+from scipy.integrate import solve_ivp
+from qutils.orbital import (dim2NonDim6, nonDim2Dim4,
+                            MU_EARTH_JGM2, RE_EARTH_JGM2, J2_JGM2)
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
@@ -232,8 +237,67 @@ if args.pdf_evolution:
     pos_lstm  = pred_reach_l[:n_frames_ev, :, :n_pos]
     _series   = [('True', pos_true), ('Mamba', pos_mamba), ('LSTM', pos_lstm)]
 
-    # true ensemble-mean path, used as the motion trail in both figures
-    mean_traj = pos_true.mean(axis=1)                       # (T, n_pos)
+    def _nominal_traj(T):
+        """Nominal (unperturbed) trajectory, (T, D), in the same frame/units as true_reach.
+
+        2BP: config.yaml elements (periapsis alt = midpoint of lowerAlt/upperAlt), propagated
+        with J2, which tracks the GMAT data to ~30 km over a run. GMAT's first saved row is
+        epoch + 1 min, hence the grid starting at 60 s.
+        CR3BP: the dataset stores the nominal IC (IC_GEO) under 'mu'; propagate it on the saved grid.
+        """
+        data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'data')
+        orbit = str(mamba_d['orbit'])
+        dimensional = bool(mamba_d['dimensional'])
+        if D == 4:
+            ds = np.load(sorted(glob.glob(os.path.join(data_dir, 'cr3bp', orbit + '_*.npy')))[0])
+            m = 7.348E22 / (5.974E24 + 7.348E22)
+
+            def rhs(_, y):
+                x, yy, vx, vy = y
+                r1 = np.hypot(x + m, yy) ** 3
+                r2 = np.hypot(x - 1 + m, yy) ** 3
+                return [vx, vy,
+                        2 * vy + x - (1 - m) * (x + m) / r1 - m * (x - 1 + m) / r2,
+                        -2 * vx + yy - (1 - m) * yy / r1 - m * yy / r2]
+
+            t = ds['t'][0].ravel()[:T]
+            nom = solve_ivp(rhs, (t[0], t[-1]), ds['mu'], t_eval=t,
+                            method='DOP853', rtol=1e-12, atol=1e-12).y.T
+            return nonDim2Dim4(nom, 389703, 382981) if dimensional else nom
+
+        cfg = glob.glob(os.path.join(data_dir, 'gmat', orbit,
+                                     f"{int(mamba_d['prop_min'])}min-*", 'config.yaml'))[0]
+        with open(cfg) as fh:
+            c = yaml.safe_load(fh)
+        # without eccentricity_spread the generator samples e ~ U(0, eccentricity)
+        mu = MU_EARTH_JGM2
+        e = c['eccentricity'] if 'eccentricity_spread' in c else 0.5 * c['eccentricity']
+        i, raan, argp, nu = np.radians([c['inclination'], c['RAAN'],
+                                        c['argPeriapsis'], c['trueAnomaly']])
+        p = (RE_EARTH_JGM2 + 0.5 * (c['lowerAlt'] + c['upperAlt'])) * (1 + e)
+        r_pf = p / (1 + e * np.cos(nu)) * np.array([np.cos(nu), np.sin(nu), 0.0])
+        v_pf = np.sqrt(mu / p) * np.array([-np.sin(nu), e + np.cos(nu), 0.0])
+        cO, sO, ci, si, cw, sw = (np.cos(raan), np.sin(raan), np.cos(i), np.sin(i),
+                                  np.cos(argp), np.sin(argp))
+        R = np.array([[cO * cw - sO * sw * ci, -cO * sw - sO * cw * ci,  sO * si],
+                      [sO * cw + cO * sw * ci, -sO * sw + cO * cw * ci, -cO * si],
+                      [sw * si,                 cw * si,                 ci]])
+
+        def rhs(_, y):
+            r = y[:3]
+            rn = np.linalg.norm(r)
+            z2 = (r[2] / rn) ** 2
+            j2 = -1.5 * J2_JGM2 * mu * RE_EARTH_JGM2 ** 2 / rn ** 5 * r * np.array(
+                [1 - 5 * z2, 1 - 5 * z2, 3 - 5 * z2])
+            return np.r_[y[3:], -mu * r / rn ** 3 + j2]
+
+        t = (np.arange(T) + 1) * 60.0
+        nom = solve_ivp(rhs, (0.0, t[-1]), np.r_[R @ r_pf, R @ v_pf], t_eval=t,
+                        method='DOP853', rtol=1e-11, atol=1e-11).y.T
+        return nom if dimensional else dim2NonDim6(nom)
+
+    # nominal path from the dataset's generating config, used as the motion trail in both figures
+    nom_traj = _nominal_traj(n_frames_ev)[:, :n_pos]       # (T, n_pos)
 
     time_unit = 'hr' if D == 4 else 'min'
 
@@ -376,8 +440,8 @@ if args.pdf_evolution:
                 mu = pts.mean(axis=0)
                 ax_3d.scatter([mu[0]], [mu[1]], [mu[2]], s=45, color=_palette[name],
                               edgecolor='k', linewidth=0.6, depthshade=False)
-            ax_3d.plot(mean_traj[:fi + 1, 0], mean_traj[:fi + 1, 1], mean_traj[:fi + 1, 2],
-                       color='dimgray', linewidth=1.6, label='True mean path')
+            ax_3d.plot(nom_traj[:fi + 1, 0], nom_traj[:fi + 1, 1], nom_traj[:fi + 1, 2],
+                       color='dimgray', linewidth=1.6, label='Nominal path')
         else:
             # z = p(x, y); normalize by the shared max so all three stay comparable
             surfaces = {}
@@ -403,12 +467,12 @@ if args.pdf_evolution:
                         ax_3d.plot_wireframe(GX, GY, Zn, color=_palette[name],
                                              linewidth=0.5, alpha=0.7,
                                              rstride=4, cstride=4)
-            ax_3d.plot(mean_traj[:fi + 1, 0], mean_traj[:fi + 1, 1], zs=0, zdir='z',
-                       color='dimgray', linewidth=1.6, label='True mean path')
+            ax_3d.plot(nom_traj[:fi + 1, 0], nom_traj[:fi + 1, 1], zs=0, zdir='z',
+                       color='dimgray', linewidth=1.6, label='Nominal path')
 
         ax_3d.set_title(f'Position PDF Evolution — {_frame_label(fi)}')
         ax_3d.legend(handles=_legend_proxies +
-                     [mlines.Line2D([], [], color='dimgray', linewidth=1.6, label='True mean path')],
+                     [mlines.Line2D([], [], color='dimgray', linewidth=1.6, label='Nominal path')],
                      loc='upper left', fontsize=12)
         return []
 
@@ -472,7 +536,7 @@ if args.pdf_evolution:
                 GA, GB, Z, levels = res
                 ax.contour(GA, GB, Z, levels=levels,
                            colors=_palette[name], linewidths=1.2, alpha=0.9)
-            ax.plot(mean_traj[:fi + 1, a], mean_traj[:fi + 1, b],
+            ax.plot(nom_traj[:fi + 1, a], nom_traj[:fi + 1, b],
                     color='dimgray', linewidth=1.4)
             ax.set_title(f'{pos_lbl[a].split(" ")[0]}–{pos_lbl[b].split(" ")[0]}')
         fig_pr.suptitle(f'Position PDF Projections — {_frame_label(fi)}')
