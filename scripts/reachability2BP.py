@@ -278,9 +278,6 @@ model = returnModel(modelString)
 
 optimizer = Adam_mini(model,lr=lr)
 
-criterion = F.smooth_l1_loss
-criterion = torch.nn.HuberLoss()
-
 def weighted_huber_state_loss(y_pred, y_true, pos_weight = 0.5, vel_weight=1):
     # best for this problem for both models - pos_weight = 0.5, vel_weight=1
 
@@ -290,8 +287,9 @@ def weighted_huber_state_loss(y_pred, y_true, pos_weight = 0.5, vel_weight=1):
     pos_true = y_true[:, :3]
     vel_true = y_true[:, 3:]
 
-    huber_pos = torch.nn.HuberLoss()(pos_pred, pos_true)
-    huber_vel = torch.nn.HuberLoss()(vel_pred, vel_true)
+    # smooth L1 (beta=1) == Huber (delta=1); nn.HuberLoss doesn't exist in the old torch on py3.6
+    huber_pos = F.smooth_l1_loss(pos_pred, pos_true)
+    huber_vel = F.smooth_l1_loss(vel_pred, vel_true)
 
     # Combine losses with weighting
     loss = pos_weight * huber_pos + vel_weight * huber_vel 
