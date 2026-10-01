@@ -141,6 +141,8 @@ def create_datasets_spatial(data, lookback, horizon, tw=None):
         tw = train_timesteps
     split_idx = int(data.shape[1] * args.train_ratio)
     time_end = min(num_time_steps, data.shape[0])
+    # float32 before windowing: the windowed arrays are lookback x the raw data, keep them small
+    data = data.astype(np.float32)
     train_time = data[:tw]
     test_time = data[tw:time_end]
 
@@ -166,10 +168,11 @@ def create_datasets_spatial(data, lookback, horizon, tw=None):
     X_test, Y_test = build_xy(test_data)
     # Convert to PyTorch tensors (keep on CPU; move batches to GPU in the loop)
     # Shape: (num_windows, seq_length, num_trajectories, problemDim) — no squeeze, preserves (L,B,D) for Mamba
-    X_train = torch.tensor(np.array(X_train)).float()
-    Y_train = torch.tensor(np.array(Y_train)).float()
-    X_test = torch.tensor(np.array(X_test)).float()
-    Y_test = torch.tensor(np.array(Y_test)).float()
+    # from_numpy shares memory instead of copying (matters on the 2GB jetson)
+    X_train = torch.from_numpy(X_train)
+    Y_train = torch.from_numpy(Y_train)
+    X_test = torch.from_numpy(X_test)
+    Y_test = torch.from_numpy(Y_test)
 
 
     return X_train,Y_train,X_test,Y_test
