@@ -1,8 +1,5 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
 import pandas as pd
-import seaborn as sns
 import torch
 import torch.nn.functional as F
 import torch.utils.data as data
@@ -10,7 +7,6 @@ import argparse
 from scipy.spatial import ConvexHull, Delaunay
 from scipy.spatial.qhull import QhullError # import here for p36 compatibility
 from scipy.stats import gaussian_kde
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from torch import nn
 
 
@@ -19,9 +15,6 @@ from qutils.tictoc import timer
 from qutils.ml.mamba import Mamba, MambaConfig
 from qutils.ml.utils import findDecAcc
 from qutils.orbital import dim2NonDim6, nonDim2Dim6
-
-#import for superweight identification
-from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
 
 # args parsing for model, horizon, traj_index
 parser = argparse.ArgumentParser()
@@ -41,6 +34,7 @@ parser.add_argument('--dim',action="store_true",help="train WITHOUT non dimensio
 parser.add_argument('--propMin',type=int,default=30,help="propagation time in minutes for picking dataset (used in dataset path and plot titles)")
 parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
 parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
+parser.add_argument('--no-plots', action='store_true', help='Skip all plotting and animations')
 parser.add_argument('--orbit', type=str, default='leo', help='Orbit type for picking dataset (used in plot titles)')
 
 parser.add_argument('--hidden', type=int, default=32, help='Hidden size for LSTM')
@@ -51,6 +45,15 @@ parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping n
 parser.add_argument('--sigma-levels', type=int, default=4, help='Number of sigma levels for uncertainty visualization')
 
 args = parser.parse_args()
+
+if not args.no_plots:
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation, FFMpegWriter, PillowWriter
+    import seaborn as sns
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    #import for superweight identification
+    from qutils.ml.superweight import printoutMaxLayerWeight,getSuperWeight,plotSuperWeight, findMambaSuperActivation,plotSuperActivation
+    sns.set_theme(style='whitegrid', palette='muted')
 modelString = args.model
 traj_index = args.traj_index
 
@@ -575,14 +578,18 @@ def lstmEval():
 
 # generate predictions
 model.eval()
+evalTime = timer()
 if modelString.startswith('mamba'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = mambaEval()
 elif modelString.startswith('lstm'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
+if device.type == 'cuda':
+    torch.cuda.synchronize()
+evalTime.tocStr("Test inference:")
 
 
 
-if modelString.startswith('mamba'):
+if modelString.startswith('mamba') and not args.no_plots:
     test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
     xb, yb = next(iter(test_loader))
     # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
@@ -740,9 +747,6 @@ def alpha_shape_faces_and_volume(points, edge_quantile=0.95):
 # Plots
 # ==============================
 
-
-sns.set_theme(style='whitegrid', palette='muted')
-
 # 2D sigma contour levels: fraction of probability mass enclosed within k-sigma
 # Uses chi-squared CDF with 2 dof: P = 1 - exp(-k^2 / 2)
 # Capped at 3-sigma: beyond that the KDE has ~0 density with O(1000) samples,
@@ -761,61 +765,62 @@ _pfx = "plots/" + modelString + f'_orbit_{args.orbit}_prop{args.propMin}min_trai
 
 # plot 3d initial distribution of initial conditions across all trajectories, colored by training and testing split
 
-if not args.dim:
-    if modelString.startswith('mamba'):
-        for i in range(numericResult.shape[0]):
-            numericResult[i, :, :] = nonDim2Dim6(numericResult[i, :, :])
-    else:
-        for i in range(numericResult.shape[1]):
-            numericResult[:, i, :] = nonDim2Dim6(numericResult[:, i, :])
-plt.figure(figsize=(8, 6))
-ax = plt.subplot(111, projection='3d')
-split_index = int(numericResult.shape[1] * args.train_ratio)
-train_init = numericResult[0, :split_index, :3]  # (num_train_trajs, 3)
-test_init = numericResult[0, split_index:, :3]   # (num_test_trajs, 3)
-ax.scatter(train_init[:, 0], train_init[:, 1], train_init[:, 2], s=10, alpha=0.4, label='Train Initial States', color='blue')
-ax.scatter(test_init[:, 0], test_init[:, 1], test_init[:, 2], s=10, alpha=0.1, label='Test Initial States', color='C1')
-ax.set_title(f"{args.orbit.upper()} Initial Conditions\n Train Size: {train_init.shape[0]}, Test Size: {test_init.shape[0]}")
-ax.set_xlabel(pos_lbl[0])
-ax.set_ylabel(pos_lbl[1])
-ax.set_zlabel(pos_lbl[2])
-ax.legend()
-plt.savefig(_pfx + f'_initial_conditions.{saveType}')
-plt.close()
-
-
-
-# plot projections of true and predicted reachability tubes for the selected trajectory index
-fig = plt.figure(figsize=(12, 8))
-ax = fig.add_subplot(111, projection='3d')
-ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Trajectory', color='blue')
-ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Trajectory', color='orange')
-ax.set_title(f"{modelString.upper()} Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
-ax.set_xlabel(pos_lbl[0])
-ax.set_ylabel(pos_lbl[1])
-ax.set_zlabel(pos_lbl[2])
-ax.legend()
-plt.savefig(_pfx + f'_traj_{traj_idx}.{saveType}')
-plt.close()
-
-# plot each state component over time for the selected trajectory index
-time_steps_axis = np.arange(true_reach.shape[0])
-fig, axs = plt.subplots(3, 2, figsize=(15, 10))
-for i in range(6):
-    ax = axs[i // 2, i % 2]
-    _df_tc = pd.DataFrame({
-        'Time (min)': np.tile(time_steps_axis, 2),
-        state_labels[i]: np.concatenate([true_reach[:, traj_idx, i], pred_reach[:, traj_idx, i]]),
-        'Source': ['True'] * len(time_steps_axis) + ['Predicted'] * len(time_steps_axis),
-    })
-    sns.lineplot(data=_df_tc, x='Time (min)', y=state_labels[i], hue='Source',
-                 palette={'True': 'steelblue', 'Predicted': 'tomato'}, ax=ax)
-    ax.axvline(x=int(train_timesteps), color='gray', linestyle='--', label='Train/Test Split')
-    ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
+if not args.no_plots:
+    if not args.dim:
+        if modelString.startswith('mamba'):
+            for i in range(numericResult.shape[0]):
+                numericResult[i, :, :] = nonDim2Dim6(numericResult[i, :, :])
+        else:
+            for i in range(numericResult.shape[1]):
+                numericResult[:, i, :] = nonDim2Dim6(numericResult[:, i, :])
+    plt.figure(figsize=(8, 6))
+    ax = plt.subplot(111, projection='3d')
+    split_index = int(numericResult.shape[1] * args.train_ratio)
+    train_init = numericResult[0, :split_index, :3]  # (num_train_trajs, 3)
+    test_init = numericResult[0, split_index:, :3]   # (num_test_trajs, 3)
+    ax.scatter(train_init[:, 0], train_init[:, 1], train_init[:, 2], s=10, alpha=0.4, label='Train Initial States', color='blue')
+    ax.scatter(test_init[:, 0], test_init[:, 1], test_init[:, 2], s=10, alpha=0.1, label='Test Initial States', color='C1')
+    ax.set_title(f"{args.orbit.upper()} Initial Conditions\n Train Size: {train_init.shape[0]}, Test Size: {test_init.shape[0]}")
+    ax.set_xlabel(pos_lbl[0])
+    ax.set_ylabel(pos_lbl[1])
+    ax.set_zlabel(pos_lbl[2])
     ax.legend()
-plt.tight_layout()
-plt.savefig(_pfx + f'_state_components_traj_{traj_idx}.{saveType}')
-plt.close()
+    plt.savefig(_pfx + f'_initial_conditions.{saveType}')
+    plt.close()
+
+
+
+    # plot projections of true and predicted reachability tubes for the selected trajectory index
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot(true_reach[:, traj_idx, 0], true_reach[:, traj_idx, 1], true_reach[:, traj_idx, 2], label='True Trajectory', color='blue')
+    ax.plot(pred_reach[:, traj_idx, 0], pred_reach[:, traj_idx, 1], pred_reach[:, traj_idx, 2], label='Predicted Trajectory', color='orange')
+    ax.set_title(f"{modelString.upper()} Prediction for Trajectory {traj_idx}\nOrbit: {args.orbit.upper()}, Propagation: {args.propMin}min, Train Ratio: {args.train_ratio}, Epochs: {n_epochs}")
+    ax.set_xlabel(pos_lbl[0])
+    ax.set_ylabel(pos_lbl[1])
+    ax.set_zlabel(pos_lbl[2])
+    ax.legend()
+    plt.savefig(_pfx + f'_traj_{traj_idx}.{saveType}')
+    plt.close()
+
+    # plot each state component over time for the selected trajectory index
+    time_steps_axis = np.arange(true_reach.shape[0])
+    fig, axs = plt.subplots(3, 2, figsize=(15, 10))
+    for i in range(6):
+        ax = axs[i // 2, i % 2]
+        _df_tc = pd.DataFrame({
+            'Time (min)': np.tile(time_steps_axis, 2),
+            state_labels[i]: np.concatenate([true_reach[:, traj_idx, i], pred_reach[:, traj_idx, i]]),
+            'Source': ['True'] * len(time_steps_axis) + ['Predicted'] * len(time_steps_axis),
+        })
+        sns.lineplot(data=_df_tc, x='Time (min)', y=state_labels[i], hue='Source',
+                     palette={'True': 'steelblue', 'Predicted': 'tomato'}, ax=ax)
+        ax.axvline(x=int(train_timesteps), color='gray', linestyle='--', label='Train/Test Split')
+        ax.set_title(f"{state_labels[i]} over Time for Trajectory {traj_idx}")
+        ax.legend()
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_state_components_traj_{traj_idx}.{saveType}')
+    plt.close()
 
 # ==============================
 # Final-state alpha shapes (3D)
@@ -837,78 +842,79 @@ vol_ratio_vel = vol_pred_vel / vol_true_vel if vol_true_vel > 0 else float('inf'
 print(f"Position Alpha-Shape Volume  — True: {vol_true_pos:.4f}, Pred: {vol_pred_pos:.4f}, Ratio: {vol_ratio_pos:.4f}")
 print(f"Velocity Alpha-Shape Volume  — True: {vol_true_vel:.4f}, Pred: {vol_pred_vel:.4f}, Ratio: {vol_ratio_vel:.4f}")
 
-# 3D final-state scatter — positions
-fig = plt.figure(figsize=(10, 8))
-ax = fig.add_subplot(111, projection='3d')
-ax.scatter(final_true_pos[:, 0], final_true_pos[:, 1], final_true_pos[:, 2], s=6, alpha=0.35, c='k', label='True Final Pos')
-ax.scatter(final_pred_pos[:, 0], final_pred_pos[:, 1], final_pred_pos[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Pos')
-true_poly_pos = Poly3DCollection(true_faces_pos, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
-pred_poly_pos = Poly3DCollection(pred_faces_pos, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
-ax.add_collection3d(true_poly_pos)
-ax.add_collection3d(pred_poly_pos)
-ax.set_title(f'{modelString} Final State Positions Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_pos:.4f}')
-ax.set_xlabel(pos_lbl[0])
-ax.set_ylabel(pos_lbl[1])
-ax.set_zlabel(pos_lbl[2])
-ax.legend()
-plt.savefig(_pfx + f'_final_state_pos_alpha_shape.{saveType}')
-plt.close()
+if not args.no_plots:
+    # 3D final-state scatter — positions
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(final_true_pos[:, 0], final_true_pos[:, 1], final_true_pos[:, 2], s=6, alpha=0.35, c='k', label='True Final Pos')
+    ax.scatter(final_pred_pos[:, 0], final_pred_pos[:, 1], final_pred_pos[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Pos')
+    true_poly_pos = Poly3DCollection(true_faces_pos, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
+    pred_poly_pos = Poly3DCollection(pred_faces_pos, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
+    ax.add_collection3d(true_poly_pos)
+    ax.add_collection3d(pred_poly_pos)
+    ax.set_title(f'{modelString} Final State Positions Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_pos:.4f}')
+    ax.set_xlabel(pos_lbl[0])
+    ax.set_ylabel(pos_lbl[1])
+    ax.set_zlabel(pos_lbl[2])
+    ax.legend()
+    plt.savefig(_pfx + f'_final_state_pos_alpha_shape.{saveType}')
+    plt.close()
 
-# 3D final-state scatter — velocities
-fig = plt.figure(figsize=(10, 8))
-ax = fig.add_subplot(111, projection='3d')
-ax.scatter(final_true_vel[:, 0], final_true_vel[:, 1], final_true_vel[:, 2], s=6, alpha=0.35, c='k', label='True Final Vel')
-ax.scatter(final_pred_vel[:, 0], final_pred_vel[:, 1], final_pred_vel[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Vel')
-true_poly_vel = Poly3DCollection(true_faces_vel, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
-pred_poly_vel = Poly3DCollection(pred_faces_vel, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
-ax.add_collection3d(true_poly_vel)
-ax.add_collection3d(pred_poly_vel)
-ax.set_title(f'{modelString} Final State Velocities Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_vel:.4f}')
-ax.set_xlabel(vel_lbl[0])
-ax.set_ylabel(vel_lbl[1])
-ax.set_zlabel(vel_lbl[2])
-ax.legend()
-plt.savefig(_pfx + f'_final_state_vel_alpha_shape.{saveType}')
-plt.close()
+    # 3D final-state scatter — velocities
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(final_true_vel[:, 0], final_true_vel[:, 1], final_true_vel[:, 2], s=6, alpha=0.35, c='k', label='True Final Vel')
+    ax.scatter(final_pred_vel[:, 0], final_pred_vel[:, 1], final_pred_vel[:, 2], s=6, alpha=0.35, c='r', marker='x', label='Pred Final Vel')
+    true_poly_vel = Poly3DCollection(true_faces_vel, alpha=0.12, facecolor='steelblue', edgecolor='navy', linewidth=0.2)
+    pred_poly_vel = Poly3DCollection(pred_faces_vel, alpha=0.12, facecolor='tomato', edgecolor='darkred', linewidth=0.2)
+    ax.add_collection3d(true_poly_vel)
+    ax.add_collection3d(pred_poly_vel)
+    ax.set_title(f'{modelString} Final State Velocities Alpha Shape\nVol Ratio (Pred/True): {vol_ratio_vel:.4f}')
+    ax.set_xlabel(vel_lbl[0])
+    ax.set_ylabel(vel_lbl[1])
+    ax.set_zlabel(vel_lbl[2])
+    ax.legend()
+    plt.savefig(_pfx + f'_final_state_vel_alpha_shape.{saveType}')
+    plt.close()
 
-# Final-state positions — 2D projections (XY, XZ, YZ)
-_proj_pairs = [(0, 1), (0, 2), (1, 2)]
-_palette_dist = {'True': 'steelblue', 'Predicted': 'tomato'}
+    # Final-state positions — 2D projections (XY, XZ, YZ)
+    _proj_pairs = [(0, 1), (0, 2), (1, 2)]
+    _palette_dist = {'True': 'steelblue', 'Predicted': 'tomato'}
 
-_df_fpos = pd.DataFrame(
-    np.vstack([final_true_pos, final_pred_pos]), columns=pos_lbl
-)
-_df_fpos['Distribution'] = ['True'] * len(final_true_pos) + ['Predicted'] * len(final_pred_pos)
+    _df_fpos = pd.DataFrame(
+        np.vstack([final_true_pos, final_pred_pos]), columns=pos_lbl
+    )
+    _df_fpos['Distribution'] = ['True'] * len(final_true_pos) + ['Predicted'] * len(final_pred_pos)
 
-fig_pos2d, axes_pos2d = plt.subplots(1, 3, figsize=(18, 5))
-for ax, (i, j) in zip(axes_pos2d, _proj_pairs):
-    xl, yl = pos_lbl[i], pos_lbl[j]
-    sns.kdeplot(data=_df_fpos, x=xl, y=yl, hue='Distribution', ax=ax,
-                levels=6, alpha=0.8, palette=_palette_dist)
-    sns.scatterplot(data=_df_fpos, x=xl, y=yl, hue='Distribution', ax=ax,
-                    alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
-fig_pos2d.suptitle(f'{modelString} Final State Positions')
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
-plt.close()
+    fig_pos2d, axes_pos2d = plt.subplots(1, 3, figsize=(18, 5))
+    for ax, (i, j) in zip(axes_pos2d, _proj_pairs):
+        xl, yl = pos_lbl[i], pos_lbl[j]
+        sns.kdeplot(data=_df_fpos, x=xl, y=yl, hue='Distribution', ax=ax,
+                    levels=6, alpha=0.8, palette=_palette_dist)
+        sns.scatterplot(data=_df_fpos, x=xl, y=yl, hue='Distribution', ax=ax,
+                        alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+    fig_pos2d.suptitle(f'{modelString} Final State Positions')
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_state_pos_points.{saveType}')
+    plt.close()
 
-# Final-state velocities — 2D projections
-_df_fvel = pd.DataFrame(
-    np.vstack([final_true_vel, final_pred_vel]), columns=vel_lbl
-)
-_df_fvel['Distribution'] = ['True'] * len(final_true_vel) + ['Predicted'] * len(final_pred_vel)
+    # Final-state velocities — 2D projections
+    _df_fvel = pd.DataFrame(
+        np.vstack([final_true_vel, final_pred_vel]), columns=vel_lbl
+    )
+    _df_fvel['Distribution'] = ['True'] * len(final_true_vel) + ['Predicted'] * len(final_pred_vel)
 
-fig_vel2d, axes_vel2d = plt.subplots(1, 3, figsize=(18, 5))
-for ax, (i, j) in zip(axes_vel2d, _proj_pairs):
-    xl, yl = vel_lbl[i], vel_lbl[j]
-    sns.kdeplot(data=_df_fvel, x=xl, y=yl, hue='Distribution', ax=ax,
-                levels=6, alpha=0.8, palette=_palette_dist)
-    sns.scatterplot(data=_df_fvel, x=xl, y=yl, hue='Distribution', ax=ax,
-                    alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
-fig_vel2d.suptitle(f'{modelString} Final State Velocities')
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
-plt.close()
+    fig_vel2d, axes_vel2d = plt.subplots(1, 3, figsize=(18, 5))
+    for ax, (i, j) in zip(axes_vel2d, _proj_pairs):
+        xl, yl = vel_lbl[i], vel_lbl[j]
+        sns.kdeplot(data=_df_fvel, x=xl, y=yl, hue='Distribution', ax=ax,
+                    levels=6, alpha=0.8, palette=_palette_dist)
+        sns.scatterplot(data=_df_fvel, x=xl, y=yl, hue='Distribution', ax=ax,
+                        alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+    fig_vel2d.suptitle(f'{modelString} Final State Velocities')
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_state_vel_points.{saveType}')
+    plt.close()
 
 # ==============================
 # Q2 Norm over time
@@ -918,16 +924,17 @@ from qutils.ml import getQ2Norm
 
 qNorm = getQ2Norm(true_reach, pred_reach)
 
-plt.figure(figsize=(8, 6))
-plt.plot(t, qNorm, 'm-')
-plt.xlabel('Time (min)')
-plt.ylabel('Q2 Norm')
-plt.title(modelString + ' Q2 Norm Over Time')
-plt.axvline(x=train_timesteps, color='gray', linestyle='--', label='Train/Test Boundary')
-plt.legend(loc='best')
-plt.grid()
-plt.savefig(_pfx + f'_Q2_norm.{saveType}')
-plt.close()
+if not args.no_plots:
+    plt.figure(figsize=(8, 6))
+    plt.plot(t, qNorm, 'm-')
+    plt.xlabel('Time (min)')
+    plt.ylabel('Q2 Norm')
+    plt.title(modelString + ' Q2 Norm Over Time')
+    plt.axvline(x=train_timesteps, color='gray', linestyle='--', label='Train/Test Boundary')
+    plt.legend(loc='best')
+    plt.grid()
+    plt.savefig(_pfx + f'_Q2_norm.{saveType}')
+    plt.close()
 
 print(true_reach.shape)
 print(pred_reach.shape)
@@ -955,63 +962,64 @@ def _axis_lims(arr_true, arr_pred):
 pos_lo, pos_hi = _axis_lims(pos_all_true, pos_all_pred)
 vel_lo, vel_hi = _axis_lims(vel_all_true, vel_all_pred)
 
-fig_anim = plt.figure(figsize=(14, 6))
-ax_pos = fig_anim.add_subplot(121, projection='3d')
-ax_vel = fig_anim.add_subplot(122, projection='3d')
-for _ax, lo, hi, xl, yl, zl, ttl in [
-    (ax_pos, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2], 'Position'),
-    (ax_vel, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2], 'Velocity'),
-]:
-    _ax.set_xlim(lo[0], hi[0])
-    _ax.set_ylim(lo[1], hi[1])
-    _ax.set_zlim(lo[2], hi[2])
-    _ax.set_xlabel(xl)
-    _ax.set_ylabel(yl)
-    _ax.set_zlabel(zl)
-    _ax.set_title(f'Reachable Set — {ttl}')
-    _ax.grid(alpha=0.2, linewidth=0.5)
+if not args.no_plots:
+    fig_anim = plt.figure(figsize=(14, 6))
+    ax_pos = fig_anim.add_subplot(121, projection='3d')
+    ax_vel = fig_anim.add_subplot(122, projection='3d')
+    for _ax, lo, hi, xl, yl, zl, ttl in [
+        (ax_pos, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2], 'Position'),
+        (ax_vel, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2], 'Velocity'),
+    ]:
+        _ax.set_xlim(lo[0], hi[0])
+        _ax.set_ylim(lo[1], hi[1])
+        _ax.set_zlim(lo[2], hi[2])
+        _ax.set_xlabel(xl)
+        _ax.set_ylabel(yl)
+        _ax.set_zlabel(zl)
+        _ax.set_title(f'Reachable Set — {ttl}')
+        _ax.grid(alpha=0.2, linewidth=0.5)
 
-sc_true_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
-sc_pred_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
-sc_true_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
-sc_pred_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
-ax_pos.legend(loc='best')
-ax_vel.legend(loc='best')
-frame_txt = fig_anim.text(0.5, 0.01, '', ha='center', fontsize=11)
-fig_anim.suptitle(f'Reachable Set Evolution: {modelString}')
+    sc_true_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
+    sc_pred_pos = ax_pos.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
+    sc_true_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='k', label='True')
+    sc_pred_vel = ax_vel.scatter([], [], [], s=5, alpha=0.4, c='purple', marker='x', label='Pred')
+    ax_pos.legend(loc='best')
+    ax_vel.legend(loc='best')
+    frame_txt = fig_anim.text(0.5, 0.01, '', ha='center', fontsize=11)
+    fig_anim.suptitle(f'Reachable Set Evolution: {modelString}')
 
-def _anim_init():
-    empty = np.empty((0, 3))
-    for sc in [sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel]:
-        sc._offsets3d = (empty[:, 0], empty[:, 1], empty[:, 2])
-    frame_txt.set_text('')
-    return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
+    def _anim_init():
+        empty = np.empty((0, 3))
+        for sc in [sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel]:
+            sc._offsets3d = (empty[:, 0], empty[:, 1], empty[:, 2])
+        frame_txt.set_text('')
+        return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
 
-def _anim_update(fi):
-    tp = true_reach[fi, :, :3]
-    pp = pred_reach[fi, :, :3]
-    tv = true_reach[fi, :, 3:]
-    pv = pred_reach[fi, :, 3:]
-    sc_true_pos._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
-    sc_pred_pos._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
-    sc_true_vel._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
-    sc_pred_vel._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
-    region = 'Train' if fi < train_timesteps else 'Test'
-    frame_txt.set_text(f'{region} Region — t = {fi} min')
-    return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
+    def _anim_update(fi):
+        tp = true_reach[fi, :, :3]
+        pp = pred_reach[fi, :, :3]
+        tv = true_reach[fi, :, 3:]
+        pv = pred_reach[fi, :, 3:]
+        sc_true_pos._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
+        sc_pred_pos._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
+        sc_true_vel._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
+        sc_pred_vel._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
+        region = 'Train' if fi < train_timesteps else 'Test'
+        frame_txt.set_text(f'{region} Region — t = {fi} min')
+        return sc_true_pos, sc_pred_pos, sc_true_vel, sc_pred_vel, frame_txt
 
-if saveType != "pdf":  # skip animation for PDF output to save time
-    anim_reach = FuncAnimation(
-        fig_anim, _anim_update, init_func=_anim_init,
-        frames=n_frames, interval=70, blit=False, repeat=False,
-    )
-    print("Saving reachable set animation...")
-    out_anim = _pfx + '_reachable_set_evolution'
-    try:
-        anim_reach.save(out_anim + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-    except Exception:
-        anim_reach.save(out_anim + '.gif', writer=PillowWriter(fps=20))
-    plt.close(fig_anim)
+    if saveType != "pdf":  # skip animation for PDF output to save time
+        anim_reach = FuncAnimation(
+            fig_anim, _anim_update, init_func=_anim_init,
+            frames=n_frames, interval=70, blit=False, repeat=False,
+        )
+        print("Saving reachable set animation...")
+        out_anim = _pfx + '_reachable_set_evolution'
+        try:
+            anim_reach.save(out_anim + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+        except Exception:
+            anim_reach.save(out_anim + '.gif', writer=PillowWriter(fps=20))
+        plt.close(fig_anim)
 
 # ==============================
 # KDE helpers (3D)
@@ -1047,45 +1055,46 @@ dist_pred_pos = np.linalg.norm(pts_pred_6d[:, :3] - centroid_true_pos, axis=1)
 dist_true_vel = np.linalg.norm(pts_true_6d[:, 3:] - centroid_true_vel, axis=1)
 dist_pred_vel = np.linalg.norm(pts_pred_6d[:, 3:] - centroid_true_vel, axis=1)
 
-fig_cdf, (ax_pos_cdf, ax_vel_cdf) = plt.subplots(1, 2, figsize=(14, 6))
-for ax, d_true, d_pred, xlabel, title in [
-    (ax_pos_cdf, dist_true_pos, dist_pred_pos, 'Distance from centroid (km)', 'Position CDF'),
-    (ax_vel_cdf, dist_true_vel, dist_pred_vel, 'Distance from centroid (km/s)', 'Velocity CDF'),
-]:
-    _df_cdf = pd.DataFrame({
-        xlabel: np.concatenate([d_true, d_pred]),
-        'Distribution': ['True'] * len(d_true) + ['Predicted'] * len(d_pred),
+if not args.no_plots:
+    fig_cdf, (ax_pos_cdf, ax_vel_cdf) = plt.subplots(1, 2, figsize=(14, 6))
+    for ax, d_true, d_pred, xlabel, title in [
+        (ax_pos_cdf, dist_true_pos, dist_pred_pos, 'Distance from centroid (km)', 'Position CDF'),
+        (ax_vel_cdf, dist_true_vel, dist_pred_vel, 'Distance from centroid (km/s)', 'Velocity CDF'),
+    ]:
+        _df_cdf = pd.DataFrame({
+            xlabel: np.concatenate([d_true, d_pred]),
+            'Distribution': ['True'] * len(d_true) + ['Predicted'] * len(d_pred),
+        })
+        sns.ecdfplot(data=_df_cdf, x=xlabel, hue='Distribution', ax=ax,
+                     palette={'True': 'steelblue', 'Predicted': 'tomato'})
+        ax.set_ylabel('Cumulative Probability')
+        ax.set_title(title)
+
+    fig_cdf.suptitle(f'{modelString} Marginal Set CDF (Final State)')
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_marginal_cdfs.{saveType}')
+    plt.close(fig_cdf)
+
+    # Single combined CDF: z-score each dimension using the true distribution's
+    # mean/std, then pool all 6*N normalized values onto one abstract axis.
+    mu_6d = pts_true_6d.mean(axis=0)
+    sig_6d = np.where(pts_true_6d.std(axis=0) < 1e-8, 1.0, pts_true_6d.std(axis=0))
+
+    pooled_true = ((pts_true_6d - mu_6d) / sig_6d).ravel()
+    pooled_pred = ((pts_pred_6d - mu_6d) / sig_6d).ravel()
+
+    _df_cdf1 = pd.DataFrame({
+        'Normalized state value (σ from true mean)': np.concatenate([pooled_true, pooled_pred]),
+        'Distribution': ['True'] * len(pooled_true) + ['Predicted'] * len(pooled_pred),
     })
-    sns.ecdfplot(data=_df_cdf, x=xlabel, hue='Distribution', ax=ax,
-                 palette={'True': 'steelblue', 'Predicted': 'tomato'})
-    ax.set_ylabel('Cumulative Probability')
-    ax.set_title(title)
-
-fig_cdf.suptitle(f'{modelString} Marginal Set CDF (Final State)')
-plt.tight_layout()
-plt.savefig(_pfx + f'_marginal_cdfs.{saveType}')
-plt.close(fig_cdf)
-
-# Single combined CDF: z-score each dimension using the true distribution's
-# mean/std, then pool all 6*N normalized values onto one abstract axis.
-mu_6d = pts_true_6d.mean(axis=0)
-sig_6d = np.where(pts_true_6d.std(axis=0) < 1e-8, 1.0, pts_true_6d.std(axis=0))
-
-pooled_true = ((pts_true_6d - mu_6d) / sig_6d).ravel()
-pooled_pred = ((pts_pred_6d - mu_6d) / sig_6d).ravel()
-
-_df_cdf1 = pd.DataFrame({
-    'Normalized state value (σ from true mean)': np.concatenate([pooled_true, pooled_pred]),
-    'Distribution': ['True'] * len(pooled_true) + ['Predicted'] * len(pooled_pred),
-})
-fig_cdf1, ax_cdf1 = plt.subplots(figsize=(10, 6))
-sns.ecdfplot(data=_df_cdf1, x='Normalized state value (σ from true mean)', hue='Distribution',
-             ax=ax_cdf1, palette={'True': 'steelblue', 'Predicted': 'tomato'})
-ax_cdf1.set_ylabel('Cumulative Probability')
-ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)')
-plt.tight_layout()
-plt.savefig(_pfx + f'_combined_marginal_cdf.{saveType}')
-plt.close(fig_cdf1)
+    fig_cdf1, ax_cdf1 = plt.subplots(figsize=(10, 6))
+    sns.ecdfplot(data=_df_cdf1, x='Normalized state value (σ from true mean)', hue='Distribution',
+                 ax=ax_cdf1, palette={'True': 'steelblue', 'Predicted': 'tomato'})
+    ax_cdf1.set_ylabel('Cumulative Probability')
+    ax_cdf1.set_title(f'{modelString} Combined Marginal CDF (Final State)')
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_combined_marginal_cdf.{saveType}')
+    plt.close(fig_cdf1)
 
 # ==============================
 # KL divergence over time
@@ -1166,174 +1175,175 @@ for fi in range(n_frames):
 
 time_axis_anim = [i for i in range(n_frames)]
 
-# Static KL divergence plots
-_df_kl = pd.DataFrame({
-    'Time (min)': time_axis_anim,
-    'KL Divergence (true || pred)': kl_pos_values,
-})
-fig_kl_pos, ax_kl_pos = plt.subplots(figsize=(10, 5))
-sns.lineplot(data=_df_kl, x='Time (min)', y='KL Divergence (true || pred)',
-             ax=ax_kl_pos, color='steelblue', label='KL Position')
-if train_timesteps < n_frames:
-    ax_kl_pos.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_pos.set_title(f'Final Position KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}')
-ax_kl_pos.legend()
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_kl_divergence_pos.{saveType}')
-plt.close(fig_kl_pos)
+if not args.no_plots:
+    # Static KL divergence plots
+    _df_kl = pd.DataFrame({
+        'Time (min)': time_axis_anim,
+        'KL Divergence (true || pred)': kl_pos_values,
+    })
+    fig_kl_pos, ax_kl_pos = plt.subplots(figsize=(10, 5))
+    sns.lineplot(data=_df_kl, x='Time (min)', y='KL Divergence (true || pred)',
+                 ax=ax_kl_pos, color='steelblue', label='KL Position')
+    if train_timesteps < n_frames:
+        ax_kl_pos.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
+    ax_kl_pos.set_title(f'Final Position KL Divergence: {modelString} — Pos KL={kl_pos_values[-1]:.4f}')
+    ax_kl_pos.legend()
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_kl_divergence_pos.{saveType}')
+    plt.close(fig_kl_pos)
 
-_df_kl_vel = pd.DataFrame({
-    'Time (min)': time_axis_anim,
-    'KL Divergence (true || pred)': kl_vel_values,
-})
-fig_kl_vel, ax_kl_vel = plt.subplots(figsize=(10, 5))
-sns.lineplot(data=_df_kl_vel, x='Time (min)', y='KL Divergence (true || pred)',
-             ax=ax_kl_vel, color='tomato', label='KL Velocity')
-if train_timesteps < n_frames:
-    ax_kl_vel.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_vel.set_title(f'Final Velocity KL Divergence: {modelString} — Vel KL={kl_vel_values[-1]:.4f}')
-ax_kl_vel.legend()
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_kl_divergence_vel.{saveType}')
-plt.close(fig_kl_vel)
+    _df_kl_vel = pd.DataFrame({
+        'Time (min)': time_axis_anim,
+        'KL Divergence (true || pred)': kl_vel_values,
+    })
+    fig_kl_vel, ax_kl_vel = plt.subplots(figsize=(10, 5))
+    sns.lineplot(data=_df_kl_vel, x='Time (min)', y='KL Divergence (true || pred)',
+                 ax=ax_kl_vel, color='tomato', label='KL Velocity')
+    if train_timesteps < n_frames:
+        ax_kl_vel.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
+    ax_kl_vel.set_title(f'Final Velocity KL Divergence: {modelString} — Vel KL={kl_vel_values[-1]:.4f}')
+    ax_kl_vel.legend()
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_kl_divergence_vel.{saveType}')
+    plt.close(fig_kl_vel)
 
-_df_kl_6d = pd.DataFrame({
-    'Time (min)': time_axis_anim,
-    'KL Divergence (true || pred)': kl_6d_values,
-})
-fig_kl_6d, ax_kl_6d = plt.subplots(figsize=(10, 5))
-sns.lineplot(data=_df_kl_6d, x='Time (min)', y='KL Divergence (true || pred)',
-             ax=ax_kl_6d, color='purple', label='KL 6D')
-if train_timesteps < n_frames:
-    ax_kl_6d.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-ax_kl_6d.set_title(f'Full 6D KL Divergence: {modelString} — KL={kl_6d_values[-1]:.4f}')
-ax_kl_6d.legend()
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_kl_divergence_6d.{saveType}')
-plt.close(fig_kl_6d)
+    _df_kl_6d = pd.DataFrame({
+        'Time (min)': time_axis_anim,
+        'KL Divergence (true || pred)': kl_6d_values,
+    })
+    fig_kl_6d, ax_kl_6d = plt.subplots(figsize=(10, 5))
+    sns.lineplot(data=_df_kl_6d, x='Time (min)', y='KL Divergence (true || pred)',
+                 ax=ax_kl_6d, color='purple', label='KL 6D')
+    if train_timesteps < n_frames:
+        ax_kl_6d.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
+    ax_kl_6d.set_title(f'Full 6D KL Divergence: {modelString} — KL={kl_6d_values[-1]:.4f}')
+    ax_kl_6d.legend()
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_kl_divergence_6d.{saveType}')
+    plt.close(fig_kl_6d)
 
-# Animated KL divergence
-fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
-ax_kl.set_xlim(0, time_axis_anim[-1])
-kl_ymax = max(max(kl_pos_values), max(kl_vel_values)) * 1.1 + 1e-10
-ax_kl.set_ylim(0, kl_ymax)
-ax_kl.set_xlabel('Time (min)')
-ax_kl.set_ylabel('KL Divergence (true || pred)')
-ax_kl.set_title(f'KL Divergence Over Time: {modelString}')
-if train_timesteps < n_frames:
-    ax_kl.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
-(kl_line_pos,) = ax_kl.plot([], [], color='steelblue', label='Position')
-(kl_line_vel,) = ax_kl.plot([], [], color='tomato', label='Velocity')
-kl_txt = ax_kl.text(0.02, 0.95, '', transform=ax_kl.transAxes, va='top')
-ax_kl.legend()
+    # Animated KL divergence
+    fig_kl, ax_kl = plt.subplots(figsize=(10, 5))
+    ax_kl.set_xlim(0, time_axis_anim[-1])
+    kl_ymax = max(max(kl_pos_values), max(kl_vel_values)) * 1.1 + 1e-10
+    ax_kl.set_ylim(0, kl_ymax)
+    ax_kl.set_xlabel('Time (min)')
+    ax_kl.set_ylabel('KL Divergence (true || pred)')
+    ax_kl.set_title(f'KL Divergence Over Time: {modelString}')
+    if train_timesteps < n_frames:
+        ax_kl.axvline(x=time_axis_anim[train_timesteps], color='gray', linestyle='--', label='Train/Test boundary')
+    (kl_line_pos,) = ax_kl.plot([], [], color='steelblue', label='Position')
+    (kl_line_vel,) = ax_kl.plot([], [], color='tomato', label='Velocity')
+    kl_txt = ax_kl.text(0.02, 0.95, '', transform=ax_kl.transAxes, va='top')
+    ax_kl.legend()
 
-def _init_kl():
-    kl_line_pos.set_data([], [])
-    kl_line_vel.set_data([], [])
-    kl_txt.set_text('')
-    return kl_line_pos, kl_line_vel, kl_txt
+    def _init_kl():
+        kl_line_pos.set_data([], [])
+        kl_line_vel.set_data([], [])
+        kl_txt.set_text('')
+        return kl_line_pos, kl_line_vel, kl_txt
 
-def _update_kl(fi):
-    kl_line_pos.set_data(time_axis_anim[:fi + 1], kl_pos_values[:fi + 1])
-    kl_line_vel.set_data(time_axis_anim[:fi + 1], kl_vel_values[:fi + 1])
-    region = 'Train' if fi < train_timesteps else 'Test'
-    kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f} min  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
-    return kl_line_pos, kl_line_vel, kl_txt
+    def _update_kl(fi):
+        kl_line_pos.set_data(time_axis_anim[:fi + 1], kl_pos_values[:fi + 1])
+        kl_line_vel.set_data(time_axis_anim[:fi + 1], kl_vel_values[:fi + 1])
+        region = 'Train' if fi < train_timesteps else 'Test'
+        kl_txt.set_text(f'{region} — t={time_axis_anim[fi]:.1f} min  KL_pos={kl_pos_values[fi]:.4f}  KL_vel={kl_vel_values[fi]:.4f}')
+        return kl_line_pos, kl_line_vel, kl_txt
 
-if saveType != "pdf":  # skip animation for PDF output to save time
-    anim_kl = FuncAnimation(
-        fig_kl, _update_kl, init_func=_init_kl,
-        frames=n_frames, interval=70, blit=True, repeat=False,
-    )
-    print("Saving KL divergence animation...")
-    out_kl = _pfx + '_kl_divergence'
-    try:
-        anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-    except Exception:
-        anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
-    plt.close(fig_kl)
+    if saveType != "pdf":  # skip animation for PDF output to save time
+        anim_kl = FuncAnimation(
+            fig_kl, _update_kl, init_func=_init_kl,
+            frames=n_frames, interval=70, blit=True, repeat=False,
+        )
+        print("Saving KL divergence animation...")
+        out_kl = _pfx + '_kl_divergence'
+        try:
+            anim_kl.save(out_kl + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+        except Exception:
+            anim_kl.save(out_kl + '.gif', writer=PillowWriter(fps=20))
+        plt.close(fig_kl)
 
-# ==============================
-# PDF animation (density-colored 3D scatter)
-# Position and velocity subspaces side by side
-# ==============================
+    # ==============================
+    # PDF animation (density-colored 3D scatter)
+    # Position and velocity subspaces side by side
+    # ==============================
 
-def _density_colors(pts, clamp_pct=98):
-    """Evaluate KDE at each sample point; return normalized values for coloring."""
-    if pts.shape[0] < 5:
-        return np.zeros(pts.shape[0])
-    try:
-        kde = gaussian_kde(pts.T)
-        d = kde(pts.T)
-        hi_val = np.percentile(d, clamp_pct)
-        return np.clip(d / max(hi_val, 1e-30), 0, 1)
-    except Exception:
-        return np.zeros(pts.shape[0])
+    def _density_colors(pts, clamp_pct=98):
+        """Evaluate KDE at each sample point; return normalized values for coloring."""
+        if pts.shape[0] < 5:
+            return np.zeros(pts.shape[0])
+        try:
+            kde = gaussian_kde(pts.T)
+            d = kde(pts.T)
+            hi_val = np.percentile(d, clamp_pct)
+            return np.clip(d / max(hi_val, 1e-30), 0, 1)
+        except Exception:
+            return np.zeros(pts.shape[0])
 
-fig_pdf = plt.figure(figsize=(14, 6))
-ax_pos_true_pdf = fig_pdf.add_subplot(221, projection='3d')
-ax_pos_pred_pdf = fig_pdf.add_subplot(222, projection='3d')
-ax_vel_true_pdf = fig_pdf.add_subplot(223, projection='3d')
-ax_vel_pred_pdf = fig_pdf.add_subplot(224, projection='3d')
+    fig_pdf = plt.figure(figsize=(14, 6))
+    ax_pos_true_pdf = fig_pdf.add_subplot(221, projection='3d')
+    ax_pos_pred_pdf = fig_pdf.add_subplot(222, projection='3d')
+    ax_vel_true_pdf = fig_pdf.add_subplot(223, projection='3d')
+    ax_vel_pred_pdf = fig_pdf.add_subplot(224, projection='3d')
 
-for _ax, lo, hi, xl, yl, zl in [
-    (ax_pos_true_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
-    (ax_pos_pred_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
-    (ax_vel_true_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
-    (ax_vel_pred_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
-]:
-    _ax.set_xlim(lo[0], hi[0])
-    _ax.set_ylim(lo[1], hi[1])
-    _ax.set_zlim(lo[2], hi[2])
-    _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
+    for _ax, lo, hi, xl, yl, zl in [
+        (ax_pos_true_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+        (ax_pos_pred_pdf, pos_lo, pos_hi, pos_lbl[0], pos_lbl[1], pos_lbl[2]),
+        (ax_vel_true_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+        (ax_vel_pred_pdf, vel_lo, vel_hi, vel_lbl[0], vel_lbl[1], vel_lbl[2]),
+    ]:
+        _ax.set_xlim(lo[0], hi[0])
+        _ax.set_ylim(lo[1], hi[1])
+        _ax.set_zlim(lo[2], hi[2])
+        _ax.set_xlabel(xl); _ax.set_ylabel(yl); _ax.set_zlabel(zl)
 
-ax_pos_true_pdf.set_title('True Position PDF')
-ax_pos_pred_pdf.set_title('Pred Position PDF')
-ax_vel_true_pdf.set_title('True Velocity PDF')
-ax_vel_pred_pdf.set_title('Pred Velocity PDF')
-fig_pdf.suptitle(f'PDF Evolution: {modelString}')
-time_txt_pdf = fig_pdf.text(0.5, 0.01, '', ha='center', fontsize=11)
+    ax_pos_true_pdf.set_title('True Position PDF')
+    ax_pos_pred_pdf.set_title('Pred Position PDF')
+    ax_vel_true_pdf.set_title('True Velocity PDF')
+    ax_vel_pred_pdf.set_title('Pred Velocity PDF')
+    fig_pdf.suptitle(f'PDF Evolution: {modelString}')
+    time_txt_pdf = fig_pdf.text(0.5, 0.01, '', ha='center', fontsize=11)
 
-# pre-build scatter artists with dummy data
-_dummy = np.zeros((1, 3))
-sc_pos_true = ax_pos_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
-sc_pos_pred = ax_pos_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
-sc_vel_true = ax_vel_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
-sc_vel_pred = ax_vel_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
+    # pre-build scatter artists with dummy data
+    _dummy = np.zeros((1, 3))
+    sc_pos_true = ax_pos_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
+    sc_pos_pred = ax_pos_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
+    sc_vel_true = ax_vel_true_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Blues', vmin=0, vmax=1)
+    sc_vel_pred = ax_vel_pred_pdf.scatter(_dummy[:, 0], _dummy[:, 1], _dummy[:, 2], s=5, c=np.zeros(1), cmap='Reds', vmin=0, vmax=1)
 
-def _init_pdf():
-    time_txt_pdf.set_text('')
-    return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
+    def _init_pdf():
+        time_txt_pdf.set_text('')
+        return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
 
-def _update_pdf(fi):
-    tp = true_reach[fi, :, :3]
-    pp = pred_reach[fi, :, :3]
-    tv = true_reach[fi, :, 3:]
-    pv = pred_reach[fi, :, 3:]
-    sc_pos_true._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
-    sc_pos_true.set_array(_density_colors(tp))
-    sc_pos_pred._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
-    sc_pos_pred.set_array(_density_colors(pp))
-    sc_vel_true._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
-    sc_vel_true.set_array(_density_colors(tv))
-    sc_vel_pred._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
-    sc_vel_pred.set_array(_density_colors(pv))
-    region = 'Train' if fi < train_timesteps else 'Test'
-    time_txt_pdf.set_text(f'{region} Region — t = {fi} min')
-    return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
+    def _update_pdf(fi):
+        tp = true_reach[fi, :, :3]
+        pp = pred_reach[fi, :, :3]
+        tv = true_reach[fi, :, 3:]
+        pv = pred_reach[fi, :, 3:]
+        sc_pos_true._offsets3d = (tp[:, 0], tp[:, 1], tp[:, 2])
+        sc_pos_true.set_array(_density_colors(tp))
+        sc_pos_pred._offsets3d = (pp[:, 0], pp[:, 1], pp[:, 2])
+        sc_pos_pred.set_array(_density_colors(pp))
+        sc_vel_true._offsets3d = (tv[:, 0], tv[:, 1], tv[:, 2])
+        sc_vel_true.set_array(_density_colors(tv))
+        sc_vel_pred._offsets3d = (pv[:, 0], pv[:, 1], pv[:, 2])
+        sc_vel_pred.set_array(_density_colors(pv))
+        region = 'Train' if fi < train_timesteps else 'Test'
+        time_txt_pdf.set_text(f'{region} Region — t = {fi} min')
+        return sc_pos_true, sc_pos_pred, sc_vel_true, sc_vel_pred, time_txt_pdf
 
-if saveType != "pdf":  # skip animation for PDF output to save time
-    anim_pdf = FuncAnimation(
-        fig_pdf, _update_pdf, init_func=_init_pdf,
-        frames=n_frames, interval=70, blit=False, repeat=False,
-    )
-    print("Saving PDF animation...")
-    out_pdf = _pfx + '_pdf'
-    try:
-        anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
-    except Exception:
-        anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
-    plt.close(fig_pdf)
+    if saveType != "pdf":  # skip animation for PDF output to save time
+        anim_pdf = FuncAnimation(
+            fig_pdf, _update_pdf, init_func=_init_pdf,
+            frames=n_frames, interval=70, blit=False, repeat=False,
+        )
+        print("Saving PDF animation...")
+        out_pdf = _pfx + '_pdf'
+        try:
+            anim_pdf.save(out_pdf + '.mp4', writer=FFMpegWriter(fps=20, bitrate=1800))
+        except Exception:
+            anim_pdf.save(out_pdf + '.gif', writer=PillowWriter(fps=20))
+        plt.close(fig_pdf)
 
 # ==============================
 # Export ML trajectory results
@@ -1394,59 +1404,60 @@ print('Testing classifier-based distinguishability:')
 auc_final, feat_imp_final = classifier_test_6d(true_reach[-1], pred_reach[-1])
 print(f"Final-frame classifier AUC: {auc_final:.4f}.")
 print(f"Feature importances (pos_x, pos_y, pos_z, vel_x, vel_y, vel_z): {feat_imp_final}")
+if not args.no_plots:
 
-# Static final-frame PDF snapshot — 2D KDE projections (pos row, vel row)
-_fp_true_pos = true_reach[-1, :, :3]
-_fp_pred_pos = pred_reach[-1, :, :3]
-_fp_true_vel = true_reach[-1, :, 3:]
-_fp_pred_vel = pred_reach[-1, :, 3:]
+    # Static final-frame PDF snapshot — 2D KDE projections (pos row, vel row)
+    _fp_true_pos = true_reach[-1, :, :3]
+    _fp_pred_pos = pred_reach[-1, :, :3]
+    _fp_true_vel = true_reach[-1, :, 3:]
+    _fp_pred_vel = pred_reach[-1, :, 3:]
 
-fig_pdf_final, axes_pdf = plt.subplots(2, 3, figsize=(18, 10))
-for row, (pts_true, pts_pred, lbls) in enumerate([
-    (_fp_true_pos, _fp_pred_pos, pos_lbl),
-    (_fp_true_vel, _fp_pred_vel, vel_lbl),
-]):
-    _df_fp = pd.DataFrame(
-        np.vstack([pts_true, pts_pred]), columns=lbls
+    fig_pdf_final, axes_pdf = plt.subplots(2, 3, figsize=(18, 10))
+    for row, (pts_true, pts_pred, lbls) in enumerate([
+        (_fp_true_pos, _fp_pred_pos, pos_lbl),
+        (_fp_true_vel, _fp_pred_vel, vel_lbl),
+    ]):
+        _df_fp = pd.DataFrame(
+            np.vstack([pts_true, pts_pred]), columns=lbls
+        )
+        _df_fp['Distribution'] = ['True'] * len(pts_true) + ['Predicted'] * len(pts_pred)
+        for col, (i, j) in enumerate(_proj_pairs):
+            ax = axes_pdf[row, col]
+            xl, yl = lbls[i], lbls[j]
+            sns.kdeplot(data=_df_fp, x=xl, y=yl, hue='Distribution', ax=ax,
+                        levels=6, alpha=0.8, palette=_palette_dist)
+            sns.scatterplot(data=_df_fp, x=xl, y=yl, hue='Distribution', ax=ax,
+                            alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+
+    fig_pdf_final.suptitle(
+        f'Final State PDF: {modelString}'#\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
     )
-    _df_fp['Distribution'] = ['True'] * len(pts_true) + ['Predicted'] * len(pts_pred)
-    for col, (i, j) in enumerate(_proj_pairs):
-        ax = axes_pdf[row, col]
-        xl, yl = lbls[i], lbls[j]
-        sns.kdeplot(data=_df_fp, x=xl, y=yl, hue='Distribution', ax=ax,
-                    levels=6, alpha=0.8, palette=_palette_dist)
-        sns.scatterplot(data=_df_fp, x=xl, y=yl, hue='Distribution', ax=ax,
-                        alpha=0.15, s=5, rasterized=True, legend=False, palette=_palette_dist)
+    plt.tight_layout()
+    plt.savefig(_pfx + f'_final_pdf.{saveType}')
+    plt.close(fig_pdf_final)
 
-fig_pdf_final.suptitle(
-    f'Final State PDF: {modelString}'#\nKL={kl_6d_values[-1]:.4f} — AUC={auc_final:.4f}'
-)
-plt.tight_layout()
-plt.savefig(_pfx + f'_final_pdf.{saveType}')
-plt.close(fig_pdf_final)
+    # ==============================
+    # Seaborn pairplot: true vs predicted final-state distributions
+    # ==============================
 
-# ==============================
-# Seaborn pairplot: true vs predicted final-state distributions
-# ==============================
+    _df_true = pd.DataFrame(final_true, columns=state_labels)
+    _df_true['Distribution'] = 'True'
+    _df_pred = pd.DataFrame(final_pred, columns=state_labels)
+    _df_pred['Distribution'] = 'Predicted'
+    _df_pair = pd.concat([_df_true, _df_pred], ignore_index=True)
 
-_df_true = pd.DataFrame(final_true, columns=state_labels)
-_df_true['Distribution'] = 'True'
-_df_pred = pd.DataFrame(final_pred, columns=state_labels)
-_df_pred['Distribution'] = 'Predicted'
-_df_pair = pd.concat([_df_true, _df_pred], ignore_index=True)
-
-fig_pair = sns.pairplot(
-    _df_pair,
-    hue='Distribution',
-    plot_kws={'alpha': 0.3, 's': 8, 'rasterized': True},
-    diag_kws={'rasterized': True},
-    diag_kind='kde',
-    palette={'True': 'steelblue', 'Predicted': 'tomato'},
-)
-fig_pair.figure.suptitle(
-    f'{modelString} Final State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
-    y=1.01,
-)
-fig_pair.savefig(_pfx + f'_final_state_pairplot.{saveType}', bbox_inches='tight')
-plt.close(fig_pair.figure)
+    fig_pair = sns.pairplot(
+        _df_pair,
+        hue='Distribution',
+        plot_kws={'alpha': 0.3, 's': 8, 'rasterized': True},
+        diag_kws={'rasterized': True},
+        diag_kind='kde',
+        palette={'True': 'steelblue', 'Predicted': 'tomato'},
+    )
+    fig_pair.figure.suptitle(
+        f'{modelString} Final State Pairplot — True vs Predicted\nKL={kl_6d_values[-1]:.4f}, AUC={auc_final:.4f}',
+        y=1.01,
+    )
+    fig_pair.savefig(_pfx + f'_final_state_pairplot.{saveType}', bbox_inches='tight')
+    plt.close(fig_pair.figure)
 
