@@ -35,6 +35,9 @@ parser.add_argument('--propMin',type=int,default=30,help="propagation time in mi
 parser.add_argument('--n',type=int,default=10000,help='amount of trajectories used for picking dataset')
 parser.add_argument('--pdf', action='store_true', help='Whether to save plots in PDF format instead of PNG')
 parser.add_argument('--no-plots', action='store_true', help='Skip all plotting and animations')
+parser.add_argument('--no-save', action='store_true', help='Write nothing to disk (no plots, no results .npz); implies --no-plots')
+parser.add_argument('--time', action='store_true', help='Append train/test times to data/results/2bp_times_<model>_<orbit>.csv (written even with --no-save)')
+parser.add_argument('--float', action='store_true', help='Run data and model in float32 instead of the default float64')
 parser.add_argument('--orbit', type=str, default='leo', help='Orbit type for picking dataset (used in plot titles)')
 
 parser.add_argument('--hidden', type=int, default=32, help='Hidden size for LSTM')
@@ -45,6 +48,9 @@ parser.add_argument('--clip', type=float, default=1.0, help='Gradient clipping n
 parser.add_argument('--sigma-levels', type=int, default=4, help='Number of sigma levels for uncertainty visualization')
 
 args = parser.parse_args()
+# plots are only ever written to disk, so no saving means no plotting
+if args.no_save:
+    args.no_plots = True
 
 if not args.no_plots:
     import matplotlib.pyplot as plt
@@ -64,6 +70,9 @@ else:
     saveType = 'png'
 
 problemDim = 6
+
+npDtype = np.float32 if args.float else np.float64
+torchDtype = torch.float32 if args.float else torch.float64
 
 device = getDevice()
 
@@ -141,8 +150,8 @@ def create_datasets_spatial(data, lookback, horizon, tw=None):
         tw = train_timesteps
     split_idx = int(data.shape[1] * args.train_ratio)
     time_end = min(num_time_steps, data.shape[0])
-    # float32 before windowing: the windowed arrays are lookback x the raw data, keep them small
-    data = data.astype(np.float32)
+    # cast before windowing: the windowed arrays are lookback x the raw data (use --float to halve them)
+    data = data.astype(npDtype)
     train_time = data[:tw]
     test_time = data[tw:time_end]
 
@@ -234,12 +243,12 @@ def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timestep
     Xte = (Xte - mu) / sig
     Yte = (Yte - mu) / sig
 
-    Xtr = torch.tensor(Xtr, dtype=torch.float32)
-    Ytr = torch.tensor(Ytr, dtype=torch.float32)
-    Xte = torch.tensor(Xte, dtype=torch.float32)
-    Yte = torch.tensor(Yte, dtype=torch.float32)
+    Xtr = torch.tensor(Xtr, dtype=torchDtype)
+    Ytr = torch.tensor(Ytr, dtype=torchDtype)
+    Xte = torch.tensor(Xte, dtype=torchDtype)
+    Yte = torch.tensor(Yte, dtype=torchDtype)
 
-    norm = {"mu": torch.tensor(mu, dtype=torch.float32), "sig": torch.tensor(sig, dtype=torch.float32)}
+    norm = {"mu": torch.tensor(mu, dtype=torchDtype), "sig": torch.tensor(sig, dtype=torchDtype)}
     meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
     return Xtr, Ytr, Xte, Yte, norm, meta
 
@@ -264,7 +273,7 @@ config = MambaConfig(d_model=problemDim, n_layers=num_layers,d_conv=16,d_state=1
 
 def returnModel(modelString = 'mamba'):
     if modelString == 'mamba':
-        model = Mamba(config).to(device).float()
+        model = Mamba(config).to(device=device, dtype=torchDtype)
     elif modelString == 'lstm':
         model = SimpleLSTMRegressor(
             input_size=input_size,
@@ -272,7 +281,7 @@ def returnModel(modelString = 'mamba'):
             output_size=output_size,
             num_layers=args.layers,
             dropout=args.dropout,
-        ).to(device).float()
+        ).to(device=device, dtype=torchDtype)
     printModelParmSize(model)
     return model
 
@@ -364,7 +373,7 @@ def trainMamba():
 
         print("Epoch %d: train loss %.4f, test loss %.4f\n" % (epoch, train_loss, test_loss))
 
-    trainTime.toc()
+    return trainTime.toc()
 
 
 def trainLSTM():
@@ -442,12 +451,12 @@ def trainLSTM():
         lr_now = optimizer.param_groups[0]["lr"]
         print(f"Epoch {epoch:03d}: train RMSE {train_rmse:.6f}, test RMSE {test_rmse:.6f}, lr {lr_now:.2e}")
 
-    trainTime.toc()
+    return trainTime.toc()
 
 if modelString.startswith('mamba'):
-    trainMamba()
+    trainSec = trainMamba()
 elif modelString.startswith('lstm'):
-    trainLSTM()
+    trainSec = trainLSTM()
 
 
 def mambaEval():
@@ -586,7 +595,22 @@ elif modelString.startswith('lstm'):
     true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
 if device.type == 'cuda':
     torch.cuda.synchronize()
-evalTime.tocStr("Test inference:")
+testSec = evalTime.tocStr("Test inference:")
+
+if args.time:
+    import os, csv, datetime, platform
+    os.makedirs("./data/results", exist_ok=True)
+    _time_file = f"./data/results/2bp_times_{modelString}_{args.orbit}.csv"
+    _new = not os.path.exists(_time_file)
+    with open(_time_file, "a", newline="") as f:
+        w = csv.writer(f)
+        if _new:
+            w.writerow(["timestamp", "host", "model", "orbit", "propMin", "n", "train_ratio", "train_timesteps",
+                        "n_epochs", "lr", "batch", "float32", "jetson", "train_s", "test_s"])
+        w.writerow([datetime.datetime.now().isoformat(timespec="seconds"), platform.node(), modelString, args.orbit,
+                    args.propMin, args.n, args.train_ratio, train_timesteps, n_epochs, lr, args.batch,
+                    args.float, args.jetson, f"{trainSec:.4f}", f"{testSec:.4f}"])
+    print(f"Times appended to {_time_file}")
 
 
 
@@ -629,7 +653,7 @@ if modelString.startswith('mamba'):
     W_tr_pred = train_timesteps - lookback - horizon + 1
     if W_tr_pred > 0:
         xs_tr = [test_trajs_train_time[i:i + lookback] for i in range(W_tr_pred)]
-        X_tr_pred = torch.tensor(np.stack(xs_tr, axis=0)).float()  # (W_tr_pred, lookback, n_test_trajs, D)
+        X_tr_pred = torch.tensor(np.stack(xs_tr, axis=0), dtype=torchDtype)  # (W_tr_pred, lookback, n_test_trajs, D)
         with torch.no_grad():
             model.eval()
             traj_chunk = args.traj_chunk
@@ -671,7 +695,7 @@ elif modelString.startswith('lstm'):
         X_tr = np.stack([test_trajs_train[i:i + lookback] for i in range(W_tr_pred)], axis=0)
         X_tr_flat = X_tr.transpose(0, 2, 1, 3).reshape(W_tr_pred * N_ts, lookback, -1)
         X_tr_flat = (X_tr_flat - mu_np) / sig_np
-        X_tr_t = torch.tensor(X_tr_flat, dtype=torch.float32)
+        X_tr_t = torch.tensor(X_tr_flat, dtype=torchDtype)
         with torch.no_grad():
             model.eval()
             tr_preds = []
@@ -1350,33 +1374,34 @@ if not args.no_plots:
 # Export ML trajectory results
 # ==============================
 
-import os
+if not args.no_save:
+    import os
 
-_results_dir = "./data/results"
-os.makedirs(_results_dir, exist_ok=True)
+    _results_dir = "./data/results"
+    os.makedirs(_results_dir, exist_ok=True)
 
-_results_file = os.path.join(
-    _results_dir,
-    f"2bp_{modelString}_orbit_{args.orbit}_prop{args.propMin}min"
-    f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npz"
-)
+    _results_file = os.path.join(
+        _results_dir,
+        f"2bp_{modelString}_orbit_{args.orbit}_prop{args.propMin}min"
+        f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npz"
+    )
 
-np.savez_compressed(
-    _results_file,
-    true_reach=true_reach,         # (T, N_trajs, D) full reachability tube — true
-    pred_reach=pred_reach,         # (T, N_trajs, D) full reachability tube — predicted
-    final_true=final_true,         # (N_trajs, D) final-state true
-    final_pred=final_pred,         # (N_trajs, D) final-state predicted
-    train_timesteps=np.array(train_timesteps),
-    kl_pos=np.array(kl_pos_values),
-    kl_vel=np.array(kl_vel_values),
-    kl_6d=np.array(kl_6d_values),
-    model=np.array(modelString),
-    orbit=np.array(args.orbit),
-    prop_min=np.array(args.propMin),
-    dimensional=np.array(not args.dim),
-)
-print(f"Results saved to {_results_file}")
+    np.savez_compressed(
+        _results_file,
+        true_reach=true_reach,         # (T, N_trajs, D) full reachability tube — true
+        pred_reach=pred_reach,         # (T, N_trajs, D) full reachability tube — predicted
+        final_true=final_true,         # (N_trajs, D) final-state true
+        final_pred=final_pred,         # (N_trajs, D) final-state predicted
+        train_timesteps=np.array(train_timesteps),
+        kl_pos=np.array(kl_pos_values),
+        kl_vel=np.array(kl_vel_values),
+        kl_6d=np.array(kl_6d_values),
+        model=np.array(modelString),
+        orbit=np.array(args.orbit),
+        prop_min=np.array(args.propMin),
+        dimensional=np.array(not args.dim),
+    )
+    print(f"Results saved to {_results_file}")
 
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import cross_val_score
