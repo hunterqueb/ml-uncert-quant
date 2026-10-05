@@ -210,8 +210,10 @@ def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timestep
             f"required test timesteps >= {min_required}"
         )
 
-    train = data_TND[:split_t, :, :]   # (Ttr, N, D)
-    test  = data_TND[split_t:, :, :]   # (Tte, N, D)
+    # Trajectory split matches create_datasets_spatial (Mamba): first train_ratio of trajs train, rest test
+    traj_split = int(N * train_ratio)
+    train = data_TND[:split_t, :traj_split, :]   # (Ttr, Ntr, D)
+    test  = data_TND[split_t:, traj_split:, :]   # (Tte, Nte, D)
 
     if jetson:
         test = test[:, :min(test.shape[1], 1000), :]
@@ -249,7 +251,7 @@ def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timestep
     Yte = torch.tensor(Yte, dtype=torchDtype)
 
     norm = {"mu": torch.tensor(mu, dtype=torchDtype), "sig": torch.tensor(sig, dtype=torchDtype)}
-    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t}
+    meta = {"W_train": Wtr, "N_train": Ntr, "W_test": Wte, "N_test": Nts, "split_t": split_t, "traj_split": traj_split}
     return Xtr, Ytr, Xte, Yte, norm, meta
 
 
@@ -516,12 +518,6 @@ def mambaEval():
     
 def lstmEval():
     with torch.no_grad():
-        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-        xb, yb = next(iter(test_loader))
-        xb = xb.to(device)
-        yb = yb.to(device)
-        pred = model(xb).cpu().numpy()
-        yb = yb.cpu().numpy()
         def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
             loader_eval = data.DataLoader(
                 data.TensorDataset(x_all),
@@ -555,11 +551,8 @@ def lstmEval():
         start = (Wte - 1) * Nts
         end = Wte * Nts
 
-        model.eval()
-        with torch.no_grad():
-            xb_last = test_in[start:end].to(device)
-            pred_last = model(xb_last).cpu()
-            true_last = test_out[start:end].cpu()
+        pred_last = test_pred_full[start:end]
+        true_last = test_out[start:end].cpu()
 
         def build_full_seq(x_all, y_all, traj_idx):
             n_test = meta["N_test"]
@@ -571,7 +564,7 @@ def lstmEval():
             full_seq = torch.cat([x_init, y_seq], dim=0)
             return denorm(full_seq).numpy()
 
-        train_traj_prefix = numericResult[:train_timesteps, traj_index, :]  # (train_timesteps, D)
+        train_traj_prefix = numericResult[:train_timesteps, meta["traj_split"] + traj_index, :]  # (train_timesteps, D)
         true_test_seq = np.concatenate(
             [train_traj_prefix, build_full_seq(test_in, test_out, traj_index)], axis=0
         )  # (800, D)
@@ -582,7 +575,7 @@ def lstmEval():
         final_true = denorm(true_last).numpy()
         final_pred = denorm(pred_last).numpy()
 
-        test_pred_full = denorm(predict_last_step(test_in))
+        test_pred_full = denorm(test_pred_full)
 
         return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
 
@@ -686,10 +679,11 @@ elif modelString.startswith('lstm'):
     true_reach_test = np.concatenate([init_reach, true_reach_wins], axis=0)
     pred_reach_test = np.concatenate([init_reach, pred_reach_wins], axis=0)
     split_t = meta["split_t"]
-    train_prefix = numericResult[:split_t, :N_ts, :]
+    traj_split = meta["traj_split"]
+    train_prefix = numericResult[:split_t, traj_split:traj_split + N_ts, :]
     true_reach = np.concatenate([train_prefix, true_reach_test], axis=0)
     # Run model on test-trajectory training-time windows to build predicted train prefix
-    test_trajs_train = numericResult[:split_t, :N_ts, :]  # (split_t, N_ts, D)
+    test_trajs_train = numericResult[:split_t, traj_split:traj_split + N_ts, :]  # (split_t, N_ts, D)
     W_tr_pred = split_t - lookback - horizon + 1
     if W_tr_pred > 0:
         X_tr = np.stack([test_trajs_train[i:i + lookback] for i in range(W_tr_pred)], axis=0)

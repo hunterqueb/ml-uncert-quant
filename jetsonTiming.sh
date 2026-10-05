@@ -6,7 +6,7 @@
 # extra args are passed through to every run, e.g. ./jetsonTiming.sh --float
 
 N=${N:-20}
-flags="--jetson --batch-test 16 --traj-chunk 250 --time --no-save --no-plots $@"
+flags="--jetson --traj-chunk 250 --time --no-save --no-plots $@"
 
 # number of data rows (minus header) in a csv, 0 if it doesn't exist
 count() { [ -f "$1" ] && echo $(( $(wc -l < "$1") - 1 )) || echo 0; }
@@ -25,9 +25,10 @@ run_until() {
 }
 
 # 2bp leo
-# run_until mamba leo --train-ratio 0.1 --train-timesteps 80 --propMin 450 --batch 8
+# run_until mamba leo --train-ratio 0.1 --train-timesteps 80 --propMin 450 --batch 8 --batch-test 16
 # run_until lstm leo --train-ratio 0.1 --train-timesteps 80 --propMin 450
 
 # 2bp elliptical
-run_until mamba heo --train-ratio 0.1 --train-timesteps 70 --propMin 1750 --batch 8 --n 3000
-run_until lstm heo --train-ratio 0.1 --train-timesteps 70 --propMin 1750 --n 3000
+run_until mamba heo --train-ratio 0.1 --train-timesteps 70 --propMin 1750 --batch 8 --batch-test 16 --n 3000
+# lstm batches match mamba sequences per pass: 8 windows x 300 train trajs = 2400, 16 windows x 250 traj-chunk = 4000
+run_until lstm heo --train-ratio 0.1 --train-timesteps 70 --propMin 1750 --batch 2400 --batch-test 4000 --n 3000
