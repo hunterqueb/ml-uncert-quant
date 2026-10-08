@@ -19,6 +19,10 @@ from qutils.orbital import dim2NonDim6, nonDim2Dim6
 # args parsing for model, horizon, traj_index
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='mamba', help='Model to use')
+parser.add_argument('--dataset', type=str, default=None, choices=['mamba', 'lstm'],
+                    help="Dataset construction approach (defaults to the model's own): "
+                         "'mamba' = windows holding all trajectories (W, L, N, D), raw states; "
+                         "'lstm' = per-trajectory samples (W*N, L, D), z-score normalized from train")
 parser.add_argument('--horizon', type=int, default=1, help='Predict this many steps ahead (target at t+horizon)')
 parser.add_argument('--lookback', type=int, default=4, help='Number of past steps fed to the model')
 parser.add_argument('--train-timesteps', type=int, default=10, help='Number of time steps from each edge used as training time region')
@@ -62,6 +66,13 @@ if not args.no_plots:
     sns.set_theme(style='whitegrid', palette='muted')
 modelString = args.model
 traj_index = args.traj_index
+
+# dataset layout is independent of the model; default to the model's own approach
+nativeData = 'mamba' if modelString.startswith('mamba') else 'lstm'
+dataMode = args.dataset if args.dataset is not None else nativeData
+# native runs keep their original filenames; cross-approach runs are tagged so they don't overwrite them
+runTag = modelString if dataMode == nativeData else f"{modelString}_{dataMode}Data"
+print(f"Model: {modelString}, dataset construction: {dataMode}")
 
 
 if args.pdf:
@@ -255,7 +266,7 @@ def create_datasets(data_TND, lookback, horizon, train_ratio=0.8, train_timestep
     return Xtr, Ytr, Xte, Yte, norm, meta
 
 
-if modelString == 'mamba':
+if dataMode == 'mamba':
     train_in,train_out,test_in,test_out = create_datasets_spatial(numericResult,lookback,horizon,tw=train_timesteps)
 else:
     numericalResult = numericResult.transpose(1,0,2) # reshape to (num_trajectories, num_time_steps, problemDim) for LSTM
@@ -290,6 +301,45 @@ def returnModel(modelString = 'mamba'):
 
 model = returnModel(modelString)
 
+def model_forward(xb):
+    """Model prediction for one batch in the dataset layout (already on device).
+    mamba data (b, L, T, D) -> (b*T, D); lstm data (b, L, D) -> (b, D)"""
+    isMamba = modelString.startswith('mamba')
+    if dataMode == 'mamba':
+        b, L, T, D_sz = xb.shape
+        if isMamba:
+            # Mamba takes (L, B, D); keep the last sequence step
+            return model(xb.permute(1, 0, 2, 3).reshape(L, b * T, D_sz))[-1]
+        return model(xb.permute(0, 2, 1, 3).reshape(b * T, L, D_sz))
+    if isMamba:
+        return model(xb.permute(1, 0, 2).contiguous())[-1]
+    return model(xb)
+
+def predict(x_all, batch_size=args.batch_test):
+    """Predictions over a whole dataset, on CPU, in the layout of its targets:
+    mamba data (W, L, N, D) -> (W, N, D); lstm data (S, L, D) -> (S, D).
+    Mamba-layout batches run --traj-chunk trajectories at a time to bound memory."""
+    loader_eval = data.DataLoader(
+        data.TensorDataset(x_all),
+        shuffle=False,
+        batch_size=batch_size,
+        pin_memory=(device.type == 'cuda'),
+    )
+    traj_chunk = args.traj_chunk
+    preds = []
+    for (xb,) in loader_eval:
+        if dataMode == 'mamba':
+            b, L, T, D_sz = xb.shape
+            pred_chunks = []
+            for t0 in range(0, T, traj_chunk):
+                t1 = min(t0 + traj_chunk, T)
+                pred_c = model_forward(xb[:, :, t0:t1, :].to(device))  # (b*tc, D)
+                pred_chunks.append(pred_c.cpu().reshape(b, t1 - t0, D_sz))
+            preds.append(torch.cat(pred_chunks, dim=1))  # (b, T, D)
+        else:
+            preds.append(model_forward(xb.to(device, non_blocking=True)).cpu())  # (b, D)
+    return torch.cat(preds, dim=0)
+
 optimizer = Adam_mini(model,lr=lr)
 
 def weighted_huber_state_loss(y_pred, y_true, pos_weight = 0.5, vel_weight=1):
@@ -319,52 +369,20 @@ def trainMamba():
         for X_batch, y_batch in loader:
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
-            # X_batch: (batch, L, num_trajs, D) → reshape to (L, batch*num_trajs, D) for Mamba
-            b, L, T, D_sz = X_batch.shape
-            X_mamba = X_batch.permute(1, 0, 2, 3).reshape(L, b * T, D_sz)
-            y_flat = y_batch.reshape(b * T, D_sz)
-            y_pred = model(X_mamba)[-1]  # take last sequence step: (b*T, D)
-            loss = criterion(y_pred, y_flat)
+            y_pred = model_forward(X_batch)  # (num_sequences, D)
+            loss = criterion(y_pred, y_batch.reshape(-1, problemDim))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         # Validation
         model.eval()
         with torch.no_grad():
-            def eval_batches(x_all, y_all, batch_size=args.batch_test):
-                loader_eval = data.DataLoader(
-                    data.TensorDataset(x_all, y_all),
-                    shuffle=True,
-                    batch_size=batch_size,
-                )
-                preds = []
-                targets = []
-                total_loss = 0.0
-                total_count = 0
-                traj_chunk = args.traj_chunk
-                for xb, yb in loader_eval:
-                    # xb: (batch, L, num_trajs, D)
-                    b, L, T, D_sz = xb.shape
-                    pred_chunks = []
-                    for t0 in range(0, T, traj_chunk):
-                        t1 = min(t0 + traj_chunk, T)
-                        xb_c = xb[:, :, t0:t1, :].to(device)  # (b, L, tc, D)
-                        yb_c = yb[:, t0:t1, :].to(device)      # (b, tc, D)
-                        tc = t1 - t0
-                        xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
-                        yb_flat = yb_c.reshape(b * tc, D_sz)
-                        pred_c = model(xb_mamba)[-1]  # (b*tc, D)
-                        batch_loss = criterion(pred_c, yb_flat).detach()
-                        total_loss += batch_loss.item() * (b * tc)
-                        total_count += b * tc
-                        pred_chunks.append(pred_c.reshape(b, tc, D_sz).cpu())
-                    pred = torch.cat(pred_chunks, dim=1)  # (b, T, D)
-                    preds.append(pred)
-                    targets.append(yb.cpu())
-                pred_all = torch.cat(preds, dim=0)    # (num_windows, num_trajs, D)
-                target_all = torch.cat(targets, dim=0)
-                rmse = np.sqrt(total_loss / max(total_count, 1))
-                return rmse, pred_all, target_all
+            def eval_batches(x_all, y_all):
+                pred_all = predict(x_all)
+                # criterion is a mean, so over the full set it equals the count-weighted batch average
+                loss_all = criterion(pred_all.reshape(-1, problemDim), y_all.reshape(-1, problemDim))
+                rmse = np.sqrt(loss_all.item())
+                return rmse, pred_all, y_all
 
             train_loss, y_pred_train, y_true_train = eval_batches(train_in, train_out)
             test_loss, y_pred_test, y_true_test = eval_batches(test_in, test_out)
@@ -401,8 +419,8 @@ def trainLSTM():
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=use_amp):
-                y_pred = model(X_batch)
-                loss = criterion(y_pred, y_batch)
+                y_pred = model_forward(X_batch)  # (num_sequences, D)
+                loss = criterion(y_pred, y_batch.reshape(-1, problemDim))
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -410,35 +428,18 @@ def trainLSTM():
             scaler.step(optimizer)
             scaler.update()
 
-            total_train_loss += loss.detach().item() * X_batch.shape[0]
-            total_train_count += X_batch.shape[0]
+            total_train_loss += loss.detach().item() * y_pred.shape[0]
+            total_train_count += y_pred.shape[0]
 
         model.eval()
         with torch.no_grad():
-            def eval_rmse(x_all, y_all, batch_size):
-                loader_eval = data.DataLoader(
-                    data.TensorDataset(x_all, y_all),
-                    shuffle=False,
-                    batch_size=batch_size,
-                    pin_memory=True
-                )
-                se_sum = 0.0
-                n_sum = 0
-                preds = []
-                targets = []
-                for xb, yb in loader_eval:
-                    xb = xb.to(device, non_blocking=True)
-                    yb = yb.to(device, non_blocking=True)
-                    pred = model(xb)
-                    se_sum += torch.sum((pred - yb) ** 2).item()
-                    n_sum += yb.numel()
-                    preds.append(pred.cpu())
-                    targets.append(yb.cpu())
-                rmse = np.sqrt(se_sum / max(n_sum, 1))
-                return rmse, torch.cat(preds, dim=0), torch.cat(targets, dim=0)
+            def eval_rmse(x_all, y_all):
+                pred_all = predict(x_all)
+                rmse = np.sqrt(torch.mean((pred_all - y_all) ** 2).item())
+                return rmse, pred_all, y_all
 
-            train_rmse, y_pred_train, y_true_train = eval_rmse(train_in, train_out, args.batch_test)
-            test_rmse,  y_pred_test,  y_true_test  = eval_rmse(test_in,  test_out,  args.batch_test)
+            train_rmse, y_pred_train, y_true_train = eval_rmse(train_in, train_out)
+            test_rmse,  y_pred_test,  y_true_test  = eval_rmse(test_in,  test_out)
 
             # Optional diagnostic metric you already use
             decAcc, err1 = findDecAcc(y_true_train, y_pred_train, printOut=False)
@@ -461,7 +462,7 @@ elif modelString.startswith('lstm'):
     trainSec = trainLSTM()
 
 
-def mambaEval():
+def evalMambaData():
     def build_full_seq(x_all, y_all, traj_idx):
         x_np = x_all.numpy()
         y_np = y_all.numpy()
@@ -476,31 +477,7 @@ def mambaEval():
 
     with torch.no_grad():
         traj_idx = traj_index
-        def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
-            loader_eval = data.DataLoader(
-                data.TensorDataset(x_all),
-                shuffle=False,
-                batch_size=batch_size,
-            )
-            traj_chunk = args.traj_chunk
-            preds = []
-            for (xb_eval,) in loader_eval:
-                b, L, T, D_sz = xb_eval.shape
-                pred_chunks = []
-                for t0 in range(0, T, traj_chunk):
-                    t1 = min(t0 + traj_chunk, T)
-                    xb_c = xb_eval[:, :, t0:t1, :].to(device)  # (b, L, tc, D)
-                    tc = t1 - t0 
-                    xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
-                    pred_c = model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz)
-                    pred_chunks.append(pred_c)
-                pred = torch.cat(pred_chunks, dim=1)  # (b, T, D)
-                if slice_traj_idx is not None:
-                    pred = pred[:, slice_traj_idx, :]  # (batch, D)
-                preds.append(pred)
-            return torch.cat(preds, dim=0)  # (num_windows, num_trajs, D) or (num_windows, D)
-
-        test_pred_full = predict_last_step(test_in)
+        test_pred_full = predict(test_in)  # (num_windows, num_trajs, D)
 
         traj_split_idx = int(numericResult.shape[1] * args.train_ratio)
         train_traj_prefix = numericResult[:train_timesteps, traj_split_idx + traj_idx, :]  # (train_timesteps, D)
@@ -516,24 +493,9 @@ def mambaEval():
 
         return true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full
     
-def lstmEval():
+def evalLSTMData():
     with torch.no_grad():
-        def predict_last_step(x_all, batch_size=args.batch_test, slice_traj_idx=None):
-            loader_eval = data.DataLoader(
-                data.TensorDataset(x_all),
-                shuffle=False,
-                batch_size=batch_size,
-            )
-            preds = []
-            for (xb_eval,) in loader_eval:
-                xb_eval = xb_eval.to(device)
-                pred = model(xb_eval).cpu()  # (batch, D)
-                if slice_traj_idx is not None:
-                    pred = pred[:, slice_traj_idx]  # (batch,)
-                preds.append(pred)
-            return torch.cat(preds, dim=0)  # (num_windows, D)
-
-        test_pred_full = predict_last_step(test_in)
+        test_pred_full = predict(test_in)  # (num_windows*num_trajs, D)
 
         # De-normalize helper
         mu = norm["mu"]
@@ -582,10 +544,11 @@ def lstmEval():
 # generate predictions
 model.eval()
 evalTime = timer()
-if modelString.startswith('mamba'):
-    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = mambaEval()
-elif modelString.startswith('lstm'):
-    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = lstmEval()
+# evaluation/reconstruction follows the dataset layout, not the model
+if dataMode == 'mamba':
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = evalMambaData()
+else:
+    true_test_seq, pred_test_seq, final_true, final_pred, test_pred_full = evalLSTMData()
 if device.type == 'cuda':
     torch.cuda.synchronize()
 testSec = evalTime.tocStr("Test inference:")
@@ -593,7 +556,7 @@ testSec = evalTime.tocStr("Test inference:")
 if args.time:
     import os, csv, datetime, platform
     os.makedirs("./data/results", exist_ok=True)
-    _time_file = f"./data/results/2bp_times_{modelString}_{args.orbit}.csv"
+    _time_file = f"./data/results/2bp_times_{runTag}_{args.orbit}.csv"
     _new = not os.path.exists(_time_file)
     with open(_time_file, "a", newline="") as f:
         w = csv.writer(f)
@@ -608,12 +571,17 @@ if args.time:
 
 
 if modelString.startswith('mamba') and not args.no_plots:
-    test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
-    xb, yb = next(iter(test_loader))
-    # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
-    b, L, T, D_sz = xb.shape
-    xb_one_traj = xb[:, :, traj_index:traj_index+1, :]  # (batch, L, 1, D)
-    xb_one_traj = xb_one_traj.permute(1, 0, 2, 3).reshape(L, b, D_sz)  # (L, batch, D)
+    if dataMode == 'mamba':
+        test_loader = data.DataLoader(data.TensorDataset(test_in, test_out), shuffle=False, batch_size=args.batch_test)
+        xb, yb = next(iter(test_loader))
+        # xb: (batch, L, num_trajs, D) — extract one trajectory and reshape to (L, batch, D)
+        b, L, T, D_sz = xb.shape
+        xb_one_traj = xb[:, :, traj_index:traj_index+1, :]  # (batch, L, 1, D)
+        xb_one_traj = xb_one_traj.permute(1, 0, 2, 3).reshape(L, b, D_sz)  # (L, batch, D)
+    else:
+        # flat samples are window-major, so every N_test-th sample is the same trajectory
+        xb_one_traj = test_in[traj_index::meta["N_test"]][:args.batch_test]  # (batch, L, D)
+        xb_one_traj = xb_one_traj.permute(1, 0, 2).contiguous()               # (L, batch, D)
     magnitude, index = findMambaSuperActivation(model, xb_one_traj.to(device))
 
     normedMagsMRP = np.zeros((len(magnitude),))
@@ -625,12 +593,12 @@ if modelString.startswith('mamba') and not args.no_plots:
     plotSuperWeight(model)
     plotSuperActivation(magnitude, index,printOutValues=True)
     plt.title("Mamba Super Activations")
-    plt.savefig("plots/" + modelString + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
+    plt.savefig("plots/" + runTag + f'_super_activations_ratio_{args.train_ratio}_epoch_{n_epochs}_index_{traj_index}_lr_{lr}_train_timesteps_{train_timesteps}.{saveType}')
 
 
 # construct full reachability sequences for true and predicted, by prepending the initial lookback states to the windowed predictions, for both train and test trajectories. This is needed to compute metrics like decAcc that depend on the full sequence of states, and also for plotting the reachability tube over time for a single trajectory.
-if modelString.startswith('mamba'):
-    init_reach = test_in.numpy()[0]                          # (lookback, num_trajs, D)
+if dataMode == 'mamba':
+    init_reach = test_in.numpy()[0]                         # (lookback, num_trajs, D)
     true_reach_test = np.concatenate(
         [init_reach, test_out.detach().cpu().numpy()], axis=0
     )                                                        # (lookback+num_windows, num_test_trajs, D)
@@ -649,24 +617,12 @@ if modelString.startswith('mamba'):
         X_tr_pred = torch.tensor(np.stack(xs_tr, axis=0), dtype=torchDtype)  # (W_tr_pred, lookback, n_test_trajs, D)
         with torch.no_grad():
             model.eval()
-            traj_chunk = args.traj_chunk
-            tr_preds = []
-            for (xb_eval,) in data.DataLoader(data.TensorDataset(X_tr_pred), shuffle=False, batch_size=args.batch_test):
-                b, L, T, D_sz = xb_eval.shape
-                pred_chunks = []
-                for t0 in range(0, T, traj_chunk):
-                    t1 = min(t0 + traj_chunk, T)
-                    xb_c = xb_eval[:, :, t0:t1, :].to(device)
-                    tc = t1 - t0
-                    xb_mamba = xb_c.permute(1, 0, 2, 3).reshape(L, b * tc, D_sz)
-                    pred_chunks.append(model(xb_mamba)[-1].cpu().reshape(b, tc, D_sz))
-                tr_preds.append(torch.cat(pred_chunks, dim=1))  # (b, T, D)
-            train_pred_wins = torch.cat(tr_preds, dim=0).numpy()  # (W_tr_pred, n_test_trajs, D)
+            train_pred_wins = predict(X_tr_pred).numpy()  # (W_tr_pred, n_test_trajs, D)
         pred_train_prefix = np.concatenate([test_trajs_train_time[:lookback], train_pred_wins], axis=0)
     else:
         pred_train_prefix = train_prefix
     pred_reach = np.concatenate([pred_train_prefix, pred_reach_test], axis=0)
-elif modelString.startswith('lstm'):
+else:
     W_te = meta["W_test"]
     N_ts = meta["N_test"]
     mu_np = norm["mu"].numpy()
@@ -692,11 +648,7 @@ elif modelString.startswith('lstm'):
         X_tr_t = torch.tensor(X_tr_flat, dtype=torchDtype)
         with torch.no_grad():
             model.eval()
-            tr_preds = []
-            for (xb_eval,) in data.DataLoader(data.TensorDataset(X_tr_t), shuffle=False, batch_size=args.batch_test):
-                xb_eval = xb_eval.to(device)
-                tr_preds.append(model(xb_eval).cpu())
-            train_pred_flat = torch.cat(tr_preds, dim=0).numpy() * sig_np + mu_np  # denormalized
+            train_pred_flat = predict(X_tr_t).numpy() * sig_np + mu_np  # denormalized
         train_pred_wins_tr = train_pred_flat.reshape(W_tr_pred, N_ts, -1)
         pred_train_prefix = np.concatenate([test_trajs_train[:lookback], train_pred_wins_tr], axis=0)
     else:
@@ -780,7 +732,7 @@ pos_lbl = ['X (km)', 'Y (km)', 'Z (km)']
 vel_lbl = ['Vx (km/s)', 'Vy (km/s)', 'Vz (km/s)']
 state_labels = pos_lbl + vel_lbl
 
-_pfx = "plots/" + modelString + f'_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
+_pfx = "plots/" + runTag + f'_orbit_{args.orbit}_prop{args.propMin}min_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}'
 
 # plot 3d initial distribution of initial conditions across all trajectories, colored by training and testing split
 
@@ -1376,7 +1328,7 @@ if not args.no_save:
 
     _results_file = os.path.join(
         _results_dir,
-        f"2bp_{modelString}_orbit_{args.orbit}_prop{args.propMin}min"
+        f"2bp_{runTag}_orbit_{args.orbit}_prop{args.propMin}min"
         f"_trainRatio_{args.train_ratio}_epoch_{n_epochs}_lr_{lr}_train_timesteps_{train_timesteps}.npz"
     )
 
@@ -1391,6 +1343,7 @@ if not args.no_save:
         kl_vel=np.array(kl_vel_values),
         kl_6d=np.array(kl_6d_values),
         model=np.array(modelString),
+        dataset=np.array(dataMode),
         orbit=np.array(args.orbit),
         prop_min=np.array(args.propMin),
         dimensional=np.array(not args.dim),
